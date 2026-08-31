@@ -3152,7 +3152,7 @@ public class MainActivity extends AppCompatActivity {
                 new Button(this);
 
         share.setText(
-                "CONFIRM & SHARE ON WHATSAPP"
+                "Need confirmation"
         );
         share.setTextSize(16);
         share.setAllCaps(false);

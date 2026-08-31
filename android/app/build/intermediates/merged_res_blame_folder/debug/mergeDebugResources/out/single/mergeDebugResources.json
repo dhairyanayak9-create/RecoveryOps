@@ -4,7 +4,19 @@
         "source": "com.recoveryops.app-main-6:/layout/activity_main.xml"
     },
     {
+        "merged": "com.recoveryops.app-debug-4:/drawable_search_box.xml.flat",
+        "source": "com.recoveryops.app-main-6:/drawable/search_box.xml"
+    },
+    {
+        "merged": "com.recoveryops.app-debug-4:/drawable_dashboard_card.xml.flat",
+        "source": "com.recoveryops.app-main-6:/drawable/dashboard_card.xml"
+    },
+    {
         "merged": "com.recoveryops.app-debug-4:/drawable_recoveryops_icon.xml.flat",
         "source": "com.recoveryops.app-main-6:/drawable/recoveryops_icon.xml"
+    },
+    {
+        "merged": "com.recoveryops.app-debug-4:/drawable_logo_circle.xml.flat",
+        "source": "com.recoveryops.app-main-6:/drawable/logo_circle.xml"
     }
 ]

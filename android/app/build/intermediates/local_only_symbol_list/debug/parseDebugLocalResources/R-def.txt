@@ -1,6 +1,9 @@
 R_DEF: Internal format may change without notice
 local
+drawable dashboard_card
+drawable logo_circle
 drawable recoveryops_icon
+drawable search_box
 id activityText
 id appPanel
 id bottomHome
@@ -9,6 +12,7 @@ id dashboardPage
 id dashboardSearch
 id drawer
 id drawerRole
+id lastSyncText
 id login
 id loginPanel
 id logoutBtn
