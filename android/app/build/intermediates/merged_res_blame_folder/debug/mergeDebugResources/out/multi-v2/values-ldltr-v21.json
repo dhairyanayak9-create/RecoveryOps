@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.recoveryops.app-mergeDebugResources-2:/values-ldltr-v21/values-ldltr-v21.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\Dhairya\\.gradle\\caches\\8.10\\transforms\\76bbb05ce422d60162c64d3b01b5e4f2\\transformed\\appcompat-1.7.0\\res\\values-ldltr-v21\\values-ldltr-v21.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "112",
+                        "endOffsets": "163"
+                    }
+                }
+            ]
+        }
+    ]
+}
