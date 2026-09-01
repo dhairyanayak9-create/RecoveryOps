@@ -1,6 +1,12 @@
 # Full installation & APK process
 
-## A. MySQL
+## A. Supabase PostgreSQL (recommended)
+1. Create/use the Supabase project.
+2. Copy the PostgreSQL connection string from Project Settings → Database.
+3. Set `SUPABASE_DB_URL` with `sslmode=require`.
+4. Verify `/api/health` before connecting Android.
+
+## B. MySQL (legacy compatibility)
 1. Install MySQL 8.
 2. Run database/schema.sql.
 3. Set DATABASE_URL.

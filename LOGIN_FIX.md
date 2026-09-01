@@ -1,15 +1,12 @@
-# Login redirect fix
+# Login + Supabase agency compatibility fix
 
-The login/session flow was patched:
-- JWT `sub` is encoded as a string.
-- JWT lookup uses the current SQLAlchemy session API.
-- Authentication runs before role authorization.
-- The browser no longer immediately reloads on a protected-request 401.
+This package keeps the existing Supabase plural UUID agency schema intact and uses the existing singular RecoveryOps tables as the operational compatibility layer.
 
-## Steps
-1. Stop the old Flask server.
-2. Extract this ZIP.
-3. Open the site in Incognito once (or clear site data for localhost).
-4. Run `start_backend.bat`.
-5. Open http://127.0.0.1:5000
-6. Login: `admin` / `admin123`
+Key fixes:
+- `user.agency_id` is added by the supplied non-destructive SQL migration.
+- Existing `public.status_history` is NOT altered. RecoveryOps legacy status history uses `status_history_legacy`.
+- `SUPER_ADMIN` is allowed to operate without an agency; tenant users remain agency-scoped.
+- User creation under a SUPER_ADMIN requires an explicit `agency_id`.
+- Email/mobile uniqueness remains enforced.
+
+Run `SUPABASE_RECOVERYOPS_COMPAT_MIGRATION.sql` once in Supabase SQL Editor, then deploy this package to Railway.

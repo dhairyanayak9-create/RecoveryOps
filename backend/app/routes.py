@@ -75,6 +75,7 @@ def vehicle_json(v, bank_name=None):
 def user_json(u):
     return {
         "id": u.id,
+        "agency_id": u.agency_id,
         "username": u.username,
         "full_name": u.full_name,
         "email": u.email,
@@ -95,7 +96,7 @@ def accessible_vehicle_query(user, write=False):
     # REPO_AGENT users can read/sync/search the full dataset so the Android
     # app remains useful after login; their status-write permission remains
     # assignment-based below.
-    if user.role in {"ADMIN", "OFFICE_STAFF"} or (
+    if user.role in {"SUPER_ADMIN", "ADMIN", "OFFICE_STAFF"} or (
         user.role == "REPO_AGENT" and not write
     ):
         return q
@@ -137,6 +138,18 @@ def can_access(user, vehicle, write=False):
         .first()
         is not None
     )
+
+
+@api.get("/health")
+def health():
+    """Lightweight deployment health check; never exposes credentials."""
+    from sqlalchemy import text as sql_text
+    try:
+        db.session.execute(sql_text("SELECT 1"))
+        return jsonify({"status": "ok", "database": "connected"})
+    except Exception:
+        db.session.rollback()
+        return jsonify({"status": "error", "database": "unavailable"}), 503
 
 
 @api.post("/auth/login")
@@ -670,7 +683,22 @@ def create_user(user):
             "error": "Mobile number already registered"
         }), 409
 
+    requested_agency_id = d.get("agency_id")
+    if user.role == "SUPER_ADMIN":
+        if requested_agency_id is None and role != "SUPER_ADMIN":
+            return jsonify({"error": "agency_id is required for tenant users"}), 400
+        target_agency_id = int(requested_agency_id) if requested_agency_id is not None else None
+    else:
+        target_agency_id = user.agency_id
+
+    if role != "SUPER_ADMIN" and not target_agency_id:
+        return jsonify({"error": "User must belong to an agency"}), 400
+
+    if target_agency_id is not None and not AgencyCompany.query.get(target_agency_id):
+        return jsonify({"error": "Agency not found"}), 404
+
     u = User(
+        agency_id=target_agency_id,
         username=username,
         full_name=full_name,
         email=email,
@@ -929,11 +957,31 @@ def create_assignment(user):
             "error": "user_id required"
         }), 400
 
+    target_user = User.query.get(d["user_id"])
+    if not target_user:
+        return jsonify({"error": "User not found in this agency"}), 404
+
+    bank_id = d.get("bank_id")
+    if bank_id is not None:
+        bank = Bank.query.get(bank_id)
+        if not bank:
+            return jsonify({"error": "Bank not found in this agency"}), 404
+
+    vehicle_id = d.get("vehicle_id")
+    if vehicle_id is not None:
+        vehicle = Vehicle.query.get(vehicle_id)
+        if not vehicle:
+            return jsonify({"error": "Vehicle not found in this agency"}), 404
+
+    permission = (d.get("permission") or "READ").strip().upper()
+    if permission not in {"READ", "UPDATE_STATUS"}:
+        return jsonify({"error": "Invalid permission"}), 400
+
     a = DataAssignment(
-        user_id=d["user_id"],
-        bank_id=d.get("bank_id"),
-        vehicle_id=d.get("vehicle_id"),
-        permission=d.get("permission", "READ"),
+        user_id=target_user.id,
+        bank_id=bank_id,
+        vehicle_id=vehicle_id,
+        permission=permission,
         active=True
     )
 
@@ -1145,9 +1193,11 @@ def sync_mutations(user):
     })
 
 
-def _process_import_job(app, file_id, temp_path, bank_id, filename, vehicle_type, uploaded_by):
+def _process_import_job(app, file_id, temp_path, bank_id, filename, vehicle_type, uploaded_by, agency_id):
     """Process a bank file outside the HTTP request so reverse proxies do not return 502."""
     with app.app_context():
+        from flask import g
+        g.agency_id = agency_id
         af = None
         try:
             af = AppFile.query.get(file_id)
@@ -1238,6 +1288,7 @@ def _process_import_job(app, file_id, temp_path, bank_id, filename, vehicle_type
                     continue
 
                 batch.append({
+                    "agency_id": agency_id,
                     "account_no": account,
                     "loan_no": value(row, "loan_no"),
                     "registration_no": reg,
@@ -1284,6 +1335,7 @@ def _process_import_job(app, file_id, temp_path, bank_id, filename, vehicle_type
                     db.session.bulk_insert_mappings(
                         Notification,
                         [{
+                            "agency_id": agency_id,
                             "user_id": rid,
                             "title": "New file uploaded",
                             "message": f"{filename} uploaded successfully with {created:,} records. Existing bank file replaced.",
@@ -1365,7 +1417,7 @@ def import_file(user):
         app_obj = current_app._get_current_object()
         threading.Thread(
             target=_process_import_job,
-            args=(app_obj, file_id, temp_path, bank_id, filename, request.form.get("vehicle_type"), user.id),
+            args=(app_obj, file_id, temp_path, bank_id, filename, request.form.get("vehicle_type"), user.id, user.agency_id),
             daemon=True
         ).start()
         return jsonify({
@@ -1538,13 +1590,19 @@ def add_recovery(user):
             "error": "No access"
         }), 403
 
+    client_id = d.get("client_id")
+    if client_id is not None and not Client.query.get(client_id):
+        return jsonify({"error": "Client not found in this agency"}), 404
+
+    assigned_user_id = d.get("assigned_user_id") or user.id
+    assigned_user = User.query.get(assigned_user_id)
+    if not assigned_user:
+        return jsonify({"error": "Assigned user not found in this agency"}), 404
+
     r = RecoveryCase(
         vehicle_id=v.id,
-        client_id=d.get("client_id"),
-        assigned_user_id=(
-            d.get("assigned_user_id")
-            or user.id
-        ),
+        client_id=client_id,
+        assigned_user_id=assigned_user.id,
         stage=d.get(
             "stage",
             "OPEN"
@@ -1691,91 +1749,41 @@ def delete_file(user, file_id):
 @api.get("/agencies")
 @auth_required
 def agencies(user):
-    return jsonify([
-        obj_json(
-            x,
-            [
-                "id",
-                "name",
-                "code",
-                "phone",
-                "email",
-                "active",
-                "created_at"
-            ]
-        )
-        for x in AgencyCompany.query.order_by(
-            AgencyCompany.name
-        ).all()
-    ])
+    fields = ["id", "name", "code", "phone", "email", "active", "created_at"]
+    if user.role == "SUPER_ADMIN":
+        return jsonify([obj_json(a, fields) for a in AgencyCompany.query.order_by(AgencyCompany.id.asc()).all()])
+    a = AgencyCompany.query.get_or_404(user.agency_id)
+    return jsonify([obj_json(a, fields)])
 
 
 @api.post("/agencies")
 @auth_required
-@roles("ADMIN", "OFFICE_STAFF")
+@roles("ADMIN")
 def add_agency(user):
     d = request.get_json(silent=True) or {}
-
     name = (d.get("name") or "").strip()
-
+    code = (d.get("code") or "").strip() or None
     if not name:
-        return jsonify({
-            "error": "Agency name required"
-        }), 400
-
-    a = AgencyCompany(
-        name=name,
-        code=(
-            d.get("code") or ""
-        ).strip() or None,
-        phone=normalize_phone(
-            d.get("phone")
-        ),
-        email=normalize_email(
-            d.get("email")
-        )
-    )
-
+        return jsonify({"error": "Agency name is required"}), 400
+    if AgencyCompany.query.filter(AgencyCompany.name == name).first():
+        return jsonify({"error": "Agency already exists"}), 409
+    if code and AgencyCompany.query.filter(AgencyCompany.code == code).first():
+        return jsonify({"error": "Agency code already exists"}), 409
+    a = AgencyCompany(name=name, code=code, phone=d.get("phone"), email=normalize_email(d.get("email")))
     db.session.add(a)
-
-    try:
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-
-        return jsonify({
-            "error": "Agency already exists"
-        }), 409
-
-    return jsonify(
-        obj_json(
-            a,
-            [
-                "id",
-                "name",
-                "code",
-                "phone",
-                "email",
-                "active"
-            ]
-        )
-    ), 201
+    db.session.commit()
+    return jsonify(obj_json(a, ["id", "name", "code", "phone", "email", "active", "created_at"])), 201
 
 
 @api.delete("/agencies/<int:agency_id>")
 @auth_required
-@roles("ADMIN", "OFFICE_STAFF")
+@roles("ADMIN")
 def delete_agency(user, agency_id):
-    a = AgencyCompany.query.get_or_404(
-        agency_id
-    )
-
-    db.session.delete(a)
-    db.session.commit()
-
+    if agency_id != user.agency_id:
+        return jsonify({"error": "No access"}), 403
     return jsonify({
-        "message": "Agency deleted"
-    })
+        "error": "Agency deletion is disabled for tenant administrators"
+    }), 403
 
 
 @api.get("/challans")

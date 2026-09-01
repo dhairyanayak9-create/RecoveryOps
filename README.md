@@ -2,7 +2,7 @@
 
 ## What is included
 - Flask backend + SQLAlchemy
-- Railway/MySQL support through `DATABASE_URL`
+- Supabase PostgreSQL support through `SUPABASE_DB_URL` / `DATABASE_URL` (MySQL remains supported)
 - Username/email/mobile login
 - Server-side user access control
 - Email and mobile uniqueness
@@ -36,13 +36,11 @@ Change/remove this before production.
 
 ## Railway
 
-1. Create a MySQL service.
-2. Create a backend service from this GitHub repository.
-3. Set backend root directory to `/backend`.
-4. Add variable:
-   `DATABASE_URL=${{MySQL.MYSQL_URL}}`
-5. Add strong random `SECRET_KEY` and `JWT_SECRET_KEY`.
-6. Start command:
+1. Create a backend service from this GitHub repository.
+2. Set backend root directory to `/backend`.
+3. For production, set `SUPABASE_DB_URL` to the PostgreSQL connection string from Supabase -> Project Settings -> Database.
+4. Add strong random `SECRET_KEY` and `JWT_SECRET_KEY`.
+5. Start command:
    `gunicorn -w 2 -b 0.0.0.0:$PORT "app:create_app()"`
 7. Generate a Railway public domain.
 8. Use the HTTPS domain as the Android/API base URL.
@@ -58,6 +56,14 @@ For production:
 Build -> Generate Signed Bundle / APK -> APK -> create/use a release keystore.
 
 Before building, set the Android API base URL to your Railway HTTPS domain.
+
+## Supabase / agency tenancy
+
+The backend uses PostgreSQL/SQLAlchemy with an agency-scoped schema. Every tenant model carries `agency_id`, authenticated requests establish the agency from the user record, and ORM SELECT/INSERT/UPDATE operations are guarded server-side so one agency cannot access another agency's records through normal API requests.
+
+The existing Supabase `public.agencies`, `agency_members`, `profiles`, etc. tables are not deleted or renamed by the application. The RecoveryOps SQLAlchemy tables use the existing singular table names (`agency_company`, `user`, `vehicle`, etc.) so the application can move to the same Supabase PostgreSQL project without destructive schema changes.
+
+Use `GET /api/health` after deployment to verify the backend can reach PostgreSQL.
 
 ## Important database note
 

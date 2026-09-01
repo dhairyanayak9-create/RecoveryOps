@@ -86,3 +86,7 @@ Voice recognition itself is provided by the device/browser speech service. The a
 - Do not commit `.env`, database passwords, JWT secrets, or Android signing keys to GitHub.
 - Rotate the Railway MySQL password if it was previously exposed.
 - For a fresh Railway database, `db.create_all()` can create the new tables. For an already-used production database, use migrations instead of relying on `create_all()` for schema changes.
+
+- [x] Supabase PostgreSQL/psycopg connection support
+- [x] Agency-scoped ORM read/write guard
+- [x] `/api/health` database connectivity endpoint

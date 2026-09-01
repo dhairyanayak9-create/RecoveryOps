@@ -1,6 +1,6 @@
 # Architecture
 
-Browser → Flask REST API → MySQL
+Browser / Android → Flask REST API → Supabase PostgreSQL (or MySQL/SQLite for compatibility)
 Android → Flask REST API → Room/SQLite local cache
 
 Offline:
