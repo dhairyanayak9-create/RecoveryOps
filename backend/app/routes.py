@@ -942,9 +942,9 @@ def delete_user(user, user_id):
             "error": "You cannot delete your own account"
         }), 400
 
-    if u.role == "ADMIN":
+    if u.role == "SUPER_ADMIN":
         return jsonify({
-            "error": "Admin account cannot be deleted from this screen"
+            "error": "Super admin account cannot be deleted from this screen"
         }), 400
 
     u.active = False
@@ -1366,8 +1366,13 @@ def _process_import_job(app, file_id, temp_path, bank_id, filename, vehicle_type
             if not any(k in mapping for k in ("registration_no", "chassis_no", "account_no")):
                 raise ValueError("File must contain Registration Number, Chassis Number, or Account Number column.")
 
-            # Replace the selected bank's previous imported file(s) using set-based deletes.
-            old_files = AppFile.query.filter_by(bank_id=bank_id).all()
+            # Replace only this agency's previous imported file(s). The tenant
+            # guard also scopes this query, but keep the agency predicate explicit
+            # because this code runs in a background worker.
+            old_files = AppFile.query.filter(
+                AppFile.bank_id == bank_id,
+                AppFile.agency_id == agency_id
+            ).all()
             old_vehicle_count = sum(
                 Vehicle.query.filter_by(source_file_id=old_file.id).count()
                 for old_file in old_files
@@ -1463,7 +1468,10 @@ def _process_import_job(app, file_id, temp_path, bank_id, filename, vehicle_type
                 af.status = "IMPORTED"
                 db.session.commit()
 
-                recipients = User.query.filter_by(active=True, is_deleted=False).with_entities(User.id).all()
+                recipients_q = User.query.filter_by(active=True, is_deleted=False)
+                if agency_id is not None:
+                    recipients_q = recipients_q.filter(User.agency_id == agency_id)
+                recipients = recipients_q.with_entities(User.id).all()
                 if recipients:
                     db.session.bulk_insert_mappings(
                         Notification,
@@ -1513,9 +1521,16 @@ def import_file(user):
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid bank_id"}), 400
 
-    bank = Bank.query.get(bank_id)
+    bank_q = Bank.query.filter(Bank.id == bank_id)
+    if user.role != "SUPER_ADMIN":
+        bank_q = bank_q.filter(Bank.agency_id == user.agency_id)
+    bank = bank_q.first()
     if not bank:
-        return jsonify({"error": "Selected bank does not exist."}), 404
+        return jsonify({"error": "Selected bank does not exist in your agency."}), 404
+
+    # Files always belong to the bank's agency. SUPER_ADMIN may provision/import
+    # for a specific agency, while tenant admins are locked to their own agency.
+    file_agency_id = bank.agency_id if bank.agency_id is not None else user.agency_id
 
     f = request.files["file"]
     filename = (f.filename or "").strip()
@@ -1537,6 +1552,7 @@ def import_file(user):
     try:
         f.save(temp_path)
         af = AppFile(
+            agency_id=file_agency_id,
             filename=filename,
             vehicle_type=(request.form.get("vehicle_type") or "").strip() or None,
             bank_id=bank_id,
@@ -1550,7 +1566,7 @@ def import_file(user):
         app_obj = current_app._get_current_object()
         threading.Thread(
             target=_process_import_job,
-            args=(app_obj, file_id, temp_path, bank_id, filename, request.form.get("vehicle_type"), user.id, user.agency_id),
+            args=(app_obj, file_id, temp_path, bank_id, filename, request.form.get("vehicle_type"), user.id, file_agency_id),
             daemon=True
         ).start()
         return jsonify({
@@ -1784,7 +1800,7 @@ def files_list(user):
         AppFile.id.desc()
     )
 
-    if user.role != "ADMIN":
+    if user.role not in {"ADMIN", "OFFICE_STAFF", "SUPER_ADMIN"}:
         bank_ids = db.session.query(
             DataAssignment.bank_id
         ).filter(
@@ -1792,10 +1808,7 @@ def files_list(user):
             DataAssignment.active.is_(True),
             DataAssignment.bank_id.isnot(None)
         )
-
-        q = q.filter(
-            AppFile.bank_id.in_(bank_ids)
-        )
+        q = q.filter(AppFile.bank_id.in_(bank_ids))
 
     return jsonify([
         obj_json(
@@ -1819,7 +1832,7 @@ def files_list(user):
 @auth_required
 def file_status(user, file_id):
     f = AppFile.query.get_or_404(file_id)
-    if user.role not in {"ADMIN", "OFFICE_STAFF"}:
+    if user.role not in {"ADMIN", "OFFICE_STAFF", "SUPER_ADMIN"}:
         bank_ids = db.session.query(DataAssignment.bank_id).filter(
             DataAssignment.user_id == user.id,
             DataAssignment.active.is_(True),
@@ -1832,7 +1845,9 @@ def file_status(user, file_id):
         "filename": f.filename,
         "status": f.status,
         "record_count": f.record_count or 0,
-        "bank_id": f.bank_id
+        "bank_id": f.bank_id,
+        "agency_id": f.agency_id,
+        "uploaded_by": f.uploaded_by
     })
 
 

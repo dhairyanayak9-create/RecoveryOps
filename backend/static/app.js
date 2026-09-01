@@ -96,11 +96,22 @@ async function upload(){
     const fileId=d.file_id;
     let done=null;
     for(let i=0;i<1800;i++){
-      let st=await api(`/files/${fileId}`);
+      let st;
+      try{
+        st=await api(`/files/${fileId}`);
+      }catch(err){
+        // A freshly queued job can briefly race the status read on a hosted DB.
+        // Retry 404s instead of turning a successful upload into a false failure.
+        if(String(err.message||'').includes('File not found') || String(err.message||'').includes('404')){
+          await new Promise(r=>setTimeout(r,1000));
+          continue;
+        }
+        throw err;
+      }
       let status=(st.status||'').toUpperCase();
       let pct=st.total>0?Math.min(99,Math.round((+st.record_count||0)*100/+st.total)):0;
       if(status==='IMPORTED'){done=st;bar.style.width='100%';$('uploadProgressText').textContent='Import completed • 100%';break}
-      if(status==='FAILED')throw Error(st.error||'File import failed.');
+      if(status==='FAILED')throw Error(st.error||'File import failed. Check server logs for the import error.');
       bar.style.width=Math.max(1,pct)+'%';
       $('uploadProgressText').textContent=pct>0?`Importing… ${pct}%`:'Importing…';
       await new Promise(r=>setTimeout(r,1000));
@@ -120,7 +131,7 @@ function startCreateUser(){pendingUser={username:$('newUsername').value.trim(),f
 async function requestUserOtp(){try{let d=await api('/users/request-otp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:pendingUser.email,phone:pendingUser.phone})});$('otpModal').classList.remove('hidden');$('otpInput').value='';$('otpMsg').textContent=d.otp_dev?`Development OTP: ${d.otp_dev}`:'OTP sent.';showToast('OTP generated.')}catch(e){showToast(e.message,'error')}}
 function closeOtpModal(){$('otpModal').classList.add('hidden')}
 async function verifyUserOtp(){let otp=$('otpInput').value.trim();if(!otp)return $('otpMsg').textContent='Enter OTP.';try{await api('/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...pendingUser,otp})});closeOtpModal();['newUsername','newName','newEmail','newPhone','newPassword'].forEach(id=>$(id).value='');showToast('User created successfully.');loadUsers()}catch(e){$('otpMsg').textContent=e.message}}
-async function loadUsers(){let d=await api('/users');$('usersOut').innerHTML=`<div class="table-wrapper"><table><thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Mobile</th><th>Role</th><th>Status</th><th>Device</th><th>Action</th></tr></thead><tbody>${d.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.full_name)}</td><td>${esc(u.email)}</td><td>${esc(u.phone)}</td><td>${esc(u.role)}</td><td><span class="status-pill ${u.active?'status-active':'status-paused'}">${u.is_deleted?'Deleted':u.active?'Active':'Paused'}</span></td><td>${u.device_id?'Linked':'Not linked'}</td><td>${u.role==='ADMIN'?'<span>Protected</span>':`<div class="action-buttons"><button onclick="editUser(${u.id})">Edit</button><button onclick="toggleUserStatus(${u.id},${!u.active})">${u.active?'Pause':'Activate'}</button><button onclick="removeUserDevice(${u.id})">Remove Device</button><button class="danger" onclick="deleteUser(${u.id})">Delete</button></div>`}</td></tr>`).join('')}</tbody></table></div>`}
+async function loadUsers(){let d=await api('/users');$('usersOut').innerHTML=`<div class="table-wrapper"><table><thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Mobile</th><th>Role</th><th>Status</th><th>Device</th><th>Action</th></tr></thead><tbody>${d.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.full_name)}</td><td>${esc(u.email)}</td><td>${esc(u.phone)}</td><td>${esc(u.role)}</td><td><span class="status-pill ${u.active?'status-active':'status-paused'}">${u.is_deleted?'Deleted':u.active?'Active':'Paused'}</span></td><td>${u.device_id?'Linked':'Not linked'}</td><td>${u.role==='SUPER_ADMIN'?'<span>Protected</span>':`<div class="action-buttons"><button onclick="editUser(${u.id})">Edit</button><button onclick="toggleUserStatus(${u.id},${!u.active})">${u.active?'Pause':'Activate'}</button><button onclick="removeUserDevice(${u.id})">Remove Device</button><button class="danger" onclick="deleteUser(${u.id})">Delete</button></div>`}</td></tr>`).join('')}</tbody></table></div>`}
 async function editUser(id){
   let u=(await api('/users')).find(x=>x.id===id);
   if(!u)return;
