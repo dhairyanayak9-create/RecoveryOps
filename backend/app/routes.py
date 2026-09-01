@@ -252,6 +252,8 @@ def login():
     identifier = (
         data.get("username")
         or data.get("identifier")
+        or data.get("email")
+        or data.get("phone")
         or ""
     ).strip()
     password = str(data.get("password") or "")
