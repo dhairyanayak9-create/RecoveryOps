@@ -175,6 +175,27 @@ def login():
                 User.phone == phone
             )
         ).first()
+        raw_debug = db.session.execute(
+            db.text("""
+                SELECT id, username, email, agency_id, active, is_deleted
+                FROM "user"
+                WHERE username = :identifier
+                   OR email = :email
+                   OR phone = :phone
+                ORDER BY id
+            """),
+            {
+                "identifier": identifier,
+                "email": email,
+                "phone": phone,
+            },
+        ).mappings().all()
+
+        print(
+            "RAW_LOGIN_DEBUG:",
+            [dict(row) for row in raw_debug],
+            flush=True,
+        )
         print(
             "LOGIN_DEBUG:",
             {
