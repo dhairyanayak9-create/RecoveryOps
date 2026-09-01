@@ -139,6 +139,7 @@ def create_app():
 
 def ensure_schema():
     """Forward-only migration for the existing database plus agency tenancy."""
+    from .models import User, AgencyCompany
     inspector = inspect(db.engine)
 
     # Existing vehicle index/migration.
@@ -153,7 +154,9 @@ def ensure_schema():
         except Exception:
             db.session.rollback()
 
-    # Add agency_id to every tenant table. Nullable first so this is safe for legacy DBs.
+    # Add agency_id to every legacy compatibility table. Existing modern UUID tables
+    # (agencies, agency_members, banks, clients, vehicles, recovery_cases, status_history)
+    # are intentionally left untouched.
     tenant_tables = [
         "user", "user_otp", "bank", "vehicle", "data_assignment",
         "status_history_legacy", "notification", "sync_mutation", "client",
@@ -161,7 +164,7 @@ def ensure_schema():
         "chat_message", "report"
     ]
     for table in tenant_tables:
-        if not inspector.has_table(table):
+        if not inspect(db.engine).has_table(table):
             continue
         cols = {c["name"] for c in inspect(db.engine).get_columns(table)}
         if "agency_id" not in cols:
@@ -173,22 +176,84 @@ def ensure_schema():
         except Exception:
             db.session.rollback()
 
-    from .models import AgencyCompany
-    agency = AgencyCompany.query.order_by(AgencyCompany.id.asc()).first()
-    if not agency:
-        agency = AgencyCompany(name="Demo Recovery Agency", code="DEMO")
-        db.session.add(agency)
-        db.session.commit()
+    # Keep a local integer compatibility id while mapping it to the user's
+    # existing UUID agency. This lets the current application remain intact
+    # without deleting or replacing the modern Supabase schema.
+    if inspect(db.engine).has_table("agency_company"):
+        cols = {c["name"] for c in inspect(db.engine).get_columns("agency_company")}
+        if "supabase_agency_id" not in cols:
+            db.session.execute(text("ALTER TABLE agency_company ADD COLUMN supabase_agency_id VARCHAR(36)"))
+            db.session.commit()
+        try:
+            db.session.execute(text("CREATE UNIQUE INDEX ix_agency_company_supabase_agency_id ON agency_company (supabase_agency_id)"))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
 
-    # Legacy data is placed in the first agency so no records disappear.
-    for table in tenant_tables:
-        if not inspect(db.engine).has_table(table):
-            continue
-        db.session.execute(
-            text(f'UPDATE "{table}" SET agency_id = :agency_id WHERE agency_id IS NULL'),
-            {"agency_id": agency.id},
-        )
+    # Map every existing Supabase agency into the compatibility table.
+    try:
+        modern_agencies = db.session.execute(text(
+            "SELECT id::text AS id, name, slug, phone, email, is_active FROM public.agencies ORDER BY created_at"
+        )).mappings().all()
+    except Exception:
+        modern_agencies = []
+    for ma in modern_agencies:
+        agency = AgencyCompany.query.filter_by(supabase_agency_id=ma["id"]).first()
+        if not agency:
+            agency = AgencyCompany.query.filter(
+                db.or_(AgencyCompany.name == ma["name"], AgencyCompany.code == ma["slug"])
+            ).first()
+        if not agency:
+            agency = AgencyCompany(
+                name=ma["name"], code=ma["slug"], phone=ma["phone"], email=ma["email"],
+                active=bool(ma["is_active"]), supabase_agency_id=ma["id"]
+            )
+            db.session.add(agency)
+        else:
+            agency.supabase_agency_id = ma["id"]
+            agency.phone = ma["phone"]
+            agency.email = ma["email"]
+            agency.active = bool(ma["is_active"])
     db.session.commit()
+
+    # Map legacy users to their existing Supabase Auth identity and agency membership by email.
+    if inspect(db.engine).has_table("user"):
+        cols = {c["name"] for c in inspect(db.engine).get_columns("user")}
+        if "supabase_user_id" not in cols:
+            db.session.execute(text('ALTER TABLE "user" ADD COLUMN supabase_user_id VARCHAR(36)'))
+            db.session.commit()
+        try:
+            db.session.execute(text('CREATE UNIQUE INDEX ix_user_supabase_user_id ON "user" (supabase_user_id)'))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+    try:
+        mappings = db.session.execute(text("""
+            SELECT u.id AS legacy_user_id, au.id::text AS auth_user_id, am.role AS member_role, am.agency_id::text AS supabase_agency_id
+            FROM public."user" u
+            JOIN auth.users au ON lower(au.email) = lower(u.email)
+            JOIN public.agency_members am ON am.user_id = au.id
+            JOIN public.agencies ag ON ag.id = am.agency_id AND ag.is_active = true
+            WHERE u.email IS NOT NULL AND am.is_active = true
+        """)).mappings().all()
+    except Exception:
+        mappings = []
+    for m in mappings:
+        u = User.query.get(m["legacy_user_id"])
+        agency = AgencyCompany.query.filter_by(supabase_agency_id=m["supabase_agency_id"]).first()
+        if u and agency:
+            u.supabase_user_id = m["auth_user_id"]
+            u.agency_id = agency.id
+            role = (m["member_role"] or "").lower()
+            if role == "admin": u.role = "ADMIN"
+            elif role == "staff": u.role = "OFFICE_STAFF"
+            elif role in {"agent", "repo_agent", "recovery_agent"}: u.role = "REPO_AGENT"
+    db.session.commit()
+
+    # Do not guess an agency for legacy data. Existing rows remain untouched until
+    # an explicit migration/assignment is performed. This prevents accidental
+    # cross-agency exposure when more than one Supabase agency exists.
 
     rows = db.session.execute(
         text("SELECT id, registration_no FROM vehicle WHERE registration_suffix IS NULL OR registration_suffix='' LIMIT 5000")

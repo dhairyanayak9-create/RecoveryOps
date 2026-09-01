@@ -35,11 +35,11 @@ def current_user():
         # The agency comes from the database, not from a client-controlled
         # request parameter or token claim. The token claim is only a hint and
         # is deliberately not trusted for authorization.
-        if user.role != "SUPER_ADMIN" and not user.agency_id:
+        if not user.agency_id and user.role != "SUPER_ADMIN":
             return None
 
         token_agency = data.get("agency_id")
-        if token_agency is not None and user.agency_id is not None and int(token_agency) != int(user.agency_id):
+        if user.role != "SUPER_ADMIN" and token_agency is not None and int(token_agency) != int(user.agency_id):
             return None
 
         token_device = data.get("device_id")
@@ -50,7 +50,7 @@ def current_user():
         ):
             return None
 
-        g.agency_id = user.agency_id
+        g.agency_id = None if user.role == "SUPER_ADMIN" else user.agency_id
         return user
 
     except Exception:
@@ -65,11 +65,11 @@ def auth_required(fn):
             not user
             or not user.active
             or getattr(user, "is_deleted", False)
-            or (user.role != "SUPER_ADMIN" and not getattr(user, "agency_id", None))
+            or (not getattr(user, "agency_id", None) and user.role != "SUPER_ADMIN")
         ):
             return jsonify({"error": "Authentication required"}), 401
 
-        g.agency_id = user.agency_id
+        g.agency_id = None if user.role == "SUPER_ADMIN" else user.agency_id
         return fn(user, *args, **kwargs)
 
     return wrapper

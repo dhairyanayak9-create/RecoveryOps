@@ -96,7 +96,7 @@ def accessible_vehicle_query(user, write=False):
     # REPO_AGENT users can read/sync/search the full dataset so the Android
     # app remains useful after login; their status-write permission remains
     # assignment-based below.
-    if user.role in {"SUPER_ADMIN", "ADMIN", "OFFICE_STAFF"} or (
+    if user.role in {"ADMIN", "OFFICE_STAFF"} or (
         user.role == "REPO_AGENT" and not write
     ):
         return q
@@ -170,50 +170,12 @@ def login():
     try:
         user = User.query.filter(
             db.or_(
-                User.username == identifier,
-                User.email == email,
+                db.func.lower(User.username) == identifier.lower(),
+                db.func.lower(User.email) == email if email else False,
                 User.phone == phone
             )
         ).first()
-        raw_debug = db.session.execute(
-            db.text("""
-                SELECT id, username, email, agency_id, active, is_deleted
-                FROM "user"
-                WHERE username = :identifier
-                   OR email = :email
-                   OR phone = :phone
-                ORDER BY id
-            """),
-            {
-                "identifier": identifier,
-                "email": email,
-                "phone": phone,
-            },
-        ).mappings().all()
 
-        print(
-            "RAW_LOGIN_DEBUG:",
-            [dict(row) for row in raw_debug],
-            flush=True,
-        )
-        print(
-            "LOGIN_DEBUG:",
-            {
-                "identifier": identifier,
-                "user_found": bool(user),
-                "user_id": user.id if user else None,
-                "username": user.username if user else None,
-                "email": user.email if user else None,
-                "agency_id": user.agency_id if user else None,
-                "active": user.active if user else None,
-                "is_deleted": user.is_deleted if user else None,
-                "hash_matches": (
-                    check_password_hash(user.password_hash, password)
-                    if user else False
-                ),
-            },
-            flush=True,
-        )
         if (
             not user
             or user.is_deleted
@@ -483,24 +445,29 @@ def vehicle_history(user, vehicle_id):
 def delete_vehicle(user, vehicle_id):
     v = Vehicle.query.get_or_404(vehicle_id)
 
-    DataAssignment.query.filter_by(
-        vehicle_id=v.id
+    DataAssignment.query.filter(
+        DataAssignment.agency_id == user.agency_id,
+        DataAssignment.vehicle_id == v.id
     ).delete(synchronize_session=False)
 
-    StatusHistory.query.filter_by(
-        vehicle_id=v.id
+    StatusHistory.query.filter(
+        StatusHistory.agency_id == user.agency_id,
+        StatusHistory.vehicle_id == v.id
     ).delete(synchronize_session=False)
 
-    SyncMutation.query.filter_by(
-        vehicle_id=v.id
+    SyncMutation.query.filter(
+        SyncMutation.agency_id == user.agency_id,
+        SyncMutation.vehicle_id == v.id
     ).delete(synchronize_session=False)
 
-    RecoveryCase.query.filter_by(
-        vehicle_id=v.id
+    RecoveryCase.query.filter(
+        RecoveryCase.agency_id == user.agency_id,
+        RecoveryCase.vehicle_id == v.id
     ).delete(synchronize_session=False)
 
-    Challan.query.filter_by(
-        vehicle_id=v.id
+    Challan.query.filter(
+        Challan.agency_id == user.agency_id,
+        Challan.vehicle_id == v.id
     ).delete(synchronize_session=False)
 
     db.session.delete(v)
@@ -526,16 +493,29 @@ def bulk_delete(user):
         if not v:
             continue
 
-        DataAssignment.query.filter_by(
-            vehicle_id=v.id
+        DataAssignment.query.filter(
+            DataAssignment.agency_id == user.agency_id,
+            DataAssignment.vehicle_id == v.id
         ).delete(synchronize_session=False)
 
-        StatusHistory.query.filter_by(
-            vehicle_id=v.id
+        StatusHistory.query.filter(
+            StatusHistory.agency_id == user.agency_id,
+            StatusHistory.vehicle_id == v.id
         ).delete(synchronize_session=False)
 
-        SyncMutation.query.filter_by(
-            vehicle_id=v.id
+        SyncMutation.query.filter(
+            SyncMutation.agency_id == user.agency_id,
+            SyncMutation.vehicle_id == v.id
+        ).delete(synchronize_session=False)
+
+        RecoveryCase.query.filter(
+            RecoveryCase.agency_id == user.agency_id,
+            RecoveryCase.vehicle_id == v.id
+        ).delete(synchronize_session=False)
+
+        Challan.query.filter(
+            Challan.agency_id == user.agency_id,
+            Challan.vehicle_id == v.id
         ).delete(synchronize_session=False)
 
         db.session.delete(v)
@@ -616,8 +596,9 @@ def request_user_otp(user):
 
     otp = f"{secrets.randbelow(1000000):06d}"
 
-    UserOTP.query.filter_by(
-        used=False
+    UserOTP.query.filter(
+        UserOTP.agency_id == user.agency_id,
+        UserOTP.used.is_(False)
     ).update(
         {"used": True},
         synchronize_session=False
@@ -680,7 +661,7 @@ def create_user(user):
             "error": "Password must contain at least 8 characters"
         }), 400
 
-    if role not in {"ADMIN", "REPO_AGENT", "OFFICE_STAFF"}:
+    if role not in {"ADMIN", "REPO_AGENT", "OFFICE_STAFF", "SUPER_ADMIN"}:
         return jsonify({"error": "Invalid role"}), 400
 
     if not otp:
@@ -721,27 +702,25 @@ def create_user(user):
             "error": "Mobile number already registered"
         }), 409
 
-    requested_agency_id = d.get("agency_id")
-    if user.role == "SUPER_ADMIN":
-        if requested_agency_id is None and role != "SUPER_ADMIN":
-            return jsonify({"error": "agency_id is required for tenant users"}), 400
-        target_agency_id = int(requested_agency_id) if requested_agency_id is not None else None
-    else:
-        target_agency_id = user.agency_id
-
-    if role != "SUPER_ADMIN" and not target_agency_id:
-        return jsonify({"error": "User must belong to an agency"}), 400
-
-    if target_agency_id is not None and not AgencyCompany.query.get(target_agency_id):
-        return jsonify({"error": "Agency not found"}), 404
+    target_agency_id = None if role == "SUPER_ADMIN" else user.agency_id
+    if user.role == "SUPER_ADMIN" and role != "SUPER_ADMIN":
+        requested_agency = d.get("agency_id")
+        if requested_agency is None:
+            return jsonify({"error": "agency_id is required for a tenant user"}), 400
+        try:
+            target_agency_id = int(requested_agency)
+        except (TypeError, ValueError):
+            return jsonify({"error": "agency_id must be an integer compatibility agency id"}), 400
+        if not AgencyCompany.query.get(target_agency_id):
+            return jsonify({"error": "Agency not found"}), 404
 
     u = User(
-        agency_id=target_agency_id,
         username=username,
         full_name=full_name,
         email=email,
         phone=phone,
         role=role,
+        agency_id=target_agency_id,
         password_hash=generate_password_hash(password),
         active=bool(d.get("active", True)),
         is_deleted=False
@@ -1279,7 +1258,7 @@ def _process_import_job(app, file_id, temp_path, bank_id, filename, vehicle_type
             )
             for old_file in old_files:
                 params = {"file_id": old_file.id}
-                for table in ("data_assignment", "status_history", "sync_mutation", "recovery_case", "challan"):
+                for table in ("data_assignment", "status_history_legacy", "sync_mutation", "recovery_case", "challan"):
                     db.session.execute(text(
                         f"DELETE FROM {table} WHERE vehicle_id IN "
                         "(SELECT id FROM vehicle WHERE source_file_id = :file_id)"
@@ -1752,20 +1731,37 @@ def delete_file(user, file_id):
     ).all()
 
     for v in vehicles:
-        DataAssignment.query.filter_by(
-            vehicle_id=v.id
+        DataAssignment.query.filter(
+            DataAssignment.agency_id == user.agency_id,
+            DataAssignment.vehicle_id == v.id
         ).delete(
             synchronize_session=False
         )
 
-        StatusHistory.query.filter_by(
-            vehicle_id=v.id
+        StatusHistory.query.filter(
+            StatusHistory.agency_id == user.agency_id,
+            StatusHistory.vehicle_id == v.id
         ).delete(
             synchronize_session=False
         )
 
-        SyncMutation.query.filter_by(
-            vehicle_id=v.id
+        SyncMutation.query.filter(
+            SyncMutation.agency_id == user.agency_id,
+            SyncMutation.vehicle_id == v.id
+        ).delete(
+            synchronize_session=False
+        )
+
+        RecoveryCase.query.filter(
+            RecoveryCase.agency_id == user.agency_id,
+            RecoveryCase.vehicle_id == v.id
+        ).delete(
+            synchronize_session=False
+        )
+
+        Challan.query.filter(
+            Challan.agency_id == user.agency_id,
+            Challan.vehicle_id == v.id
         ).delete(
             synchronize_session=False
         )
@@ -1787,27 +1783,29 @@ def delete_file(user, file_id):
 @api.get("/agencies")
 @auth_required
 def agencies(user):
-    fields = ["id", "name", "code", "phone", "email", "active", "created_at"]
     if user.role == "SUPER_ADMIN":
-        return jsonify([obj_json(a, fields) for a in AgencyCompany.query.order_by(AgencyCompany.id.asc()).all()])
-    a = AgencyCompany.query.get_or_404(user.agency_id)
-    return jsonify([obj_json(a, fields)])
+        rows = AgencyCompany.query.order_by(AgencyCompany.id.asc()).all()
+    else:
+        rows = [AgencyCompany.query.get_or_404(user.agency_id)]
+    return jsonify([obj_json(a, [
+        "id", "name", "code", "phone", "email", "active", "created_at"
+    ]) for a in rows])
 
 
 @api.post("/agencies")
 @auth_required
 @roles("ADMIN")
 def add_agency(user):
+    if user.role != "SUPER_ADMIN":
+        return jsonify({"error": "Agency provisioning requires SUPER_ADMIN"}), 403
     d = request.get_json(silent=True) or {}
     name = (d.get("name") or "").strip()
     code = (d.get("code") or "").strip() or None
     if not name:
         return jsonify({"error": "Agency name is required"}), 400
-    if AgencyCompany.query.filter(AgencyCompany.name == name).first():
+    if AgencyCompany.query.filter_by(name=name).first():
         return jsonify({"error": "Agency already exists"}), 409
-    if code and AgencyCompany.query.filter(AgencyCompany.code == code).first():
-        return jsonify({"error": "Agency code already exists"}), 409
-    a = AgencyCompany(name=name, code=code, phone=d.get("phone"), email=normalize_email(d.get("email")))
+    a = AgencyCompany(name=name, code=code, phone=(d.get("phone") or None), email=normalize_email(d.get("email")), active=True)
     db.session.add(a)
     db.session.commit()
     return jsonify(obj_json(a, ["id", "name", "code", "phone", "email", "active", "created_at"])), 201

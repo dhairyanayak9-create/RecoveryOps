@@ -1,5 +1,19 @@
 from datetime import datetime, timezone
+from sqlalchemy.types import TypeDecorator, String
+from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from . import db
+
+
+class UUIDString(TypeDecorator):
+    """Store UUIDs natively on PostgreSQL while remaining SQLite/MySQL compatible."""
+    impl = String(36)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(PostgreSQLUUID(as_uuid=False))
+        return dialect.type_descriptor(String(36))
+
 
 def now(): return datetime.now(timezone.utc)
 
@@ -7,6 +21,7 @@ class User(db.Model):
     __tablename__='user'
     id=db.Column(db.Integer,primary_key=True); agency_id=db.Column(db.Integer,db.ForeignKey('agency_company.id'),index=True,nullable=True)
     username=db.Column(db.String(80),unique=True,nullable=False,index=True)
+    supabase_user_id=db.Column(UUIDString(),unique=True,index=True)
     password_hash=db.Column(db.String(255),nullable=False); full_name=db.Column(db.String(160),nullable=False)
     role=db.Column(db.String(30),nullable=False,default='REPO_AGENT',index=True); phone=db.Column(db.String(30),unique=True,index=True)
     email=db.Column(db.String(160),unique=True,index=True); active=db.Column(db.Boolean,default=True,nullable=False)
@@ -38,8 +53,7 @@ class DataAssignment(db.Model):
     user_id=db.Column(db.Integer,db.ForeignKey('user.id'),nullable=False,index=True); bank_id=db.Column(db.Integer,db.ForeignKey('bank.id')); vehicle_id=db.Column(db.Integer,db.ForeignKey('vehicle.id'))
     permission=db.Column(db.String(30),default='READ'); active=db.Column(db.Boolean,default=True); created_at=db.Column(db.DateTime,default=now)
 class StatusHistory(db.Model):
-    # Keep the legacy application history table separate from the existing
-    # Supabase multi-agency status_history table (UUID/recovery_case_id).
+    # Compatibility history table. The existing Supabase public.status_history is UUID/recovery-case based and is preserved untouched.
     __tablename__='status_history_legacy'
     id=db.Column(db.Integer,primary_key=True); agency_id=db.Column(db.Integer,db.ForeignKey('agency_company.id'),index=True,nullable=True)
     vehicle_id=db.Column(db.Integer,db.ForeignKey('vehicle.id'),nullable=False,index=True); user_id=db.Column(db.Integer,db.ForeignKey('user.id'),nullable=False)
@@ -60,7 +74,7 @@ class AppFile(db.Model):
     id=db.Column(db.Integer,primary_key=True); agency_id=db.Column(db.Integer,db.ForeignKey('agency_company.id'),index=True,nullable=True)
     filename=db.Column(db.String(255),nullable=False); vehicle_type=db.Column(db.String(40),index=True); bank_id=db.Column(db.Integer,db.ForeignKey('bank.id'),index=True); record_count=db.Column(db.Integer,default=0); status=db.Column(db.String(40),default='IMPORTED'); uploaded_by=db.Column(db.Integer,db.ForeignKey('user.id')); created_at=db.Column(db.DateTime,default=now)
 class AgencyCompany(db.Model):
-    id=db.Column(db.Integer,primary_key=True); name=db.Column(db.String(200),nullable=False,unique=True); code=db.Column(db.String(80),unique=True); phone=db.Column(db.String(40)); email=db.Column(db.String(160)); active=db.Column(db.Boolean,default=True); created_at=db.Column(db.DateTime,default=now)
+    id=db.Column(db.Integer,primary_key=True); name=db.Column(db.String(200),nullable=False,unique=True); code=db.Column(db.String(80),unique=True); phone=db.Column(db.String(40)); email=db.Column(db.String(160)); active=db.Column(db.Boolean,default=True); supabase_agency_id=db.Column(UUIDString(),unique=True,index=True); created_at=db.Column(db.DateTime,default=now)
 class Challan(db.Model):
     id=db.Column(db.Integer,primary_key=True); agency_id=db.Column(db.Integer,db.ForeignKey('agency_company.id'),index=True,nullable=True)
     vehicle_id=db.Column(db.Integer,db.ForeignKey('vehicle.id'),index=True); challan_no=db.Column(db.String(120),index=True); amount=db.Column(db.Numeric(12,2),default=0); status=db.Column(db.String(30),default='PENDING',index=True); due_date=db.Column(db.DateTime); payment_ref=db.Column(db.String(160)); created_at=db.Column(db.DateTime,default=now)
