@@ -185,7 +185,7 @@ def ensure_schema():
         if not inspect(db.engine).has_table(table):
             continue
         db.session.execute(
-            text(f"UPDATE {table} SET agency_id = :agency_id WHERE agency_id IS NULL"),
+            text(f'UPDATE "{table}" SET agency_id = :agency_id WHERE agency_id IS NULL'),
             {"agency_id": agency.id},
         )
     db.session.commit()
