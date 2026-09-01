@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, render_template, current_app
 from sqlalchemy import text
 from werkzeug.security import check_password_hash, generate_password_hash
 from datetime import datetime, timezone
-import uuid, json, re, secrets, csv, io, os, tempfile, threading
+import uuid, json, re, secrets, csv, io, os, tempfile, threading, hmac
 import pandas as pd
 from . import db
 from .models import User, Bank, Vehicle, DataAssignment, StatusHistory, Notification, SyncMutation, Client, RecoveryCase, AppFile, AgencyCompany, Challan, ChatConversation, ChatMessage, Report, UserOTP
@@ -152,6 +152,99 @@ def health():
         return jsonify({"status": "error", "database": "unavailable"}), 503
 
 
+@api.get("/auth/diagnostic/user")
+def diagnostic_user():
+    """Temporary Railway DB authentication diagnostic.
+
+    Requires AUTH_DIAGNOSTIC_KEY and never returns password_hash.
+    Remove this endpoint and the environment variable after debugging.
+    """
+    diagnostic_key = os.getenv("AUTH_DIAGNOSTIC_KEY", "").strip()
+    supplied_key = request.headers.get("X-Diagnostic-Key", "").strip()
+
+    if (
+        not diagnostic_key
+        or not supplied_key
+        or not hmac.compare_digest(supplied_key, diagnostic_key)
+    ):
+        return jsonify({"error": "Diagnostic access denied"}), 403
+
+    email = normalize_email(request.args.get("email"))
+    password = str(request.args.get("password") or "")
+
+    if not email:
+        return jsonify({"error": "email query parameter is required"}), 400
+
+    try:
+        user = (
+            User.query
+            .filter(db.func.lower(User.email) == email)
+            .first()
+        )
+
+        if not user:
+            return jsonify({
+                "found": False,
+                "email": email,
+                "message": "User not found in Railway application's database"
+            }), 404
+
+        password_match = False
+        if user.password_hash and password:
+            try:
+                password_match = check_password_hash(
+                    user.password_hash,
+                    password
+                )
+            except Exception:
+                current_app.logger.exception(
+                    "Diagnostic password verification failed for user id=%s",
+                    user.id
+                )
+
+        return jsonify({
+            "found": True,
+            "database_user": {
+                "id": user.id,
+                "email": user.email,
+                "username": user.username,
+                "full_name": user.full_name,
+                "phone": user.phone,
+                "role": user.role,
+                "active": bool(user.active),
+                "is_deleted": bool(user.is_deleted),
+                "agency_id": user.agency_id,
+                "device_id_set": bool(user.device_id)
+            },
+            "password": {
+                "supplied": bool(password),
+                "hash_exists": bool(user.password_hash),
+                "hash_algorithm": (
+                    user.password_hash.split(":", 1)[0]
+                    if user.password_hash
+                    else None
+                ),
+                "matches": bool(password_match)
+            },
+            "diagnostic": {
+                "login_should_pass_basic_credentials_check": bool(
+                    user
+                    and not user.is_deleted
+                    and user.active
+                    and password_match
+                )
+            }
+        })
+
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception(
+            "Authentication diagnostic failed for email=%s",
+            email
+        )
+        return jsonify({"error": "Diagnostic query failed"}), 500
+
+
 @api.post("/auth/login")
 def login():
     data = request.get_json(silent=True) or {}
@@ -161,32 +254,52 @@ def login():
         or data.get("identifier")
         or ""
     ).strip()
+    password = str(data.get("password") or "")
 
-    password = data.get("password", "")
+    if not identifier or not password:
+        return jsonify({"error": "ID and password are required"}), 400
 
     email = normalize_email(identifier)
     phone = normalize_phone(identifier)
 
     try:
-        user = User.query.filter(
-            db.or_(
-                db.func.lower(User.username) == identifier.lower(),
-                db.func.lower(User.email) == email if email else False,
-                User.phone == phone
-            )
-        ).first()
+        conditions = [
+            db.func.lower(User.username) == identifier.lower()
+        ]
+        if email:
+            conditions.append(db.func.lower(User.email) == email)
+        if phone:
+            conditions.append(User.phone == phone)
 
-        if (
-            not user
-            or user.is_deleted
-            or not user.active
-            or not check_password_hash(user.password_hash, password)
-        ):
+        user = User.query.filter(db.or_(*conditions)).first()
+
+        if not user or user.is_deleted or not user.active:
+            current_app.logger.warning(
+                "Login failed: invalid/inactive user identifier=%s",
+                identifier
+            )
             return jsonify({"error": "Invalid ID or password"}), 401
 
-        # ADMIN and OFFICE_STAFF are allowed to stay signed in on both
-        # the website and Android app at the same time. REPO_AGENT remains
-        # device-bound so the existing field/device access control is kept.
+        try:
+            password_ok = check_password_hash(
+                user.password_hash or "",
+                password
+            )
+        except Exception:
+            current_app.logger.exception(
+                "Password verification failed for user id=%s",
+                user.id
+            )
+            password_ok = False
+
+        if not password_ok:
+            current_app.logger.warning(
+                "Login failed: password mismatch user_id=%s email=%s",
+                user.id,
+                user.email
+            )
+            return jsonify({"error": "Invalid ID or password"}), 401
+
         device_id = (data.get("device_id") or "").strip()
 
         if user.role == "REPO_AGENT":
@@ -195,17 +308,17 @@ def login():
 
             if user.device_id and user.device_id != device_id:
                 return jsonify({
-                    "error": "This user is already linked to another device. "
-                             "Logout from the existing device or ask an administrator "
-                             "to remove device access."
+                    "error": (
+                        "This user is already linked to another device. "
+                        "Logout from the existing device or ask an administrator "
+                        "to remove device access."
+                    )
                 }), 409
 
             if not user.device_id:
                 user.device_id = device_id
                 db.session.commit()
         else:
-            # Clear an old device binding left by the previous one-device
-            # policy so staff/admin tokens are fully independent.
             if user.device_id:
                 user.device_id = None
                 db.session.commit()
@@ -217,6 +330,7 @@ def login():
 
     except Exception:
         db.session.rollback()
+        current_app.logger.exception("Unexpected login error")
         raise
 
 
