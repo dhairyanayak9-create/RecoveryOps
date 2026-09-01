@@ -175,7 +175,24 @@ def login():
                 User.phone == phone
             )
         ).first()
-
+        print(
+            "LOGIN_DEBUG:",
+            {
+                "identifier": identifier,
+                "user_found": bool(user),
+                "user_id": user.id if user else None,
+                "username": user.username if user else None,
+                "email": user.email if user else None,
+                "agency_id": user.agency_id if user else None,
+                "active": user.active if user else None,
+                "is_deleted": user.is_deleted if user else None,
+                "hash_matches": (
+                    check_password_hash(user.password_hash, password)
+                    if user else False
+                ),
+            },
+            flush=True,
+        )
         if (
             not user
             or user.is_deleted
