@@ -52,6 +52,7 @@ def _install_tenant_guards():
                 if obj_agency is not None and obj_agency != agency_id:
                     raise ValueError("Cross-agency write blocked")
 
+
 def _database_kind(database_url):
     if database_url.startswith("postgresql+psycopg://"):
         return "postgresql"
@@ -64,8 +65,6 @@ def create_app():
     app = Flask(__name__, template_folder="../templates", static_folder="../static")
     app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-change-me")
     app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "jwt-change-me")
-    # PostgreSQL/Supabase is the production database. Keep MySQL support for
-    # existing deployments and SQLite for local development.
     database_url = (
         os.getenv("SUPABASE_DB_URL")
         or os.getenv("DATABASE_URL")
@@ -80,36 +79,25 @@ def create_app():
     elif database_url.startswith("mysql://"):
         database_url = database_url.replace("mysql://", "mysql+pymysql://", 1)
 
-    # Supabase requires TLS for database connections. Do not override an
-    # explicitly supplied sslmode in the connection string.
     if database_url.startswith("postgresql+psycopg://") and "supabase.co" in database_url and "sslmode=" not in database_url:
         database_url += "&sslmode=require" if "?" in database_url else "?sslmode=require"
     app.config["SQLALCHEMY_DATABASE_URI"] = database_url
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-        "pool_pre_ping": True,
-        "pool_recycle": 280,
-    }
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True, "pool_recycle": 280}
     if database_url.startswith("postgresql+psycopg://"):
         app.config["SQLALCHEMY_ENGINE_OPTIONS"].update({
             "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
             "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
         })
     if database_url.startswith("sqlite"):
-        app.config["SQLALCHEMY_ENGINE_OPTIONS"].update({
-            "connect_args": {"timeout": 60, "check_same_thread": False}
-        })
+        app.config["SQLALCHEMY_ENGINE_OPTIONS"].update({"connect_args": {"timeout": 60, "check_same_thread": False}})
     app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
     db.init_app(app)
     _install_tenant_guards()
 
-    # Register SQLite connection pragmas only after Flask-SQLAlchemy has been
-    # initialized and an application context is active. Accessing db.engine
-    # before that context exists causes: "Working outside of application context."
     if database_url.startswith("sqlite"):
         with app.app_context():
             engine = db.engine
-
             def _sqlite_pragmas(dbapi_connection, connection_record):
                 cursor = dbapi_connection.cursor()
                 try:
@@ -118,11 +106,12 @@ def create_app():
                     cursor.execute("PRAGMA busy_timeout=60000")
                 finally:
                     cursor.close()
-
             event.listen(engine, "connect", _sqlite_pragmas)
+
     @app.errorhandler(413)
     def request_entity_too_large(error):
         return {"error": "File size exceeds the 50 MB upload limit.", "max_bytes": 50 * 1024 * 1024}, 413
+
     CORS(app, origins=os.getenv("CORS_ORIGINS", "*").split(","))
 
     from .models import User, Bank, Vehicle, DataAssignment, StatusHistory, Notification, SyncMutation, Client, RecoveryCase, AppFile, AgencyCompany, Challan, ChatConversation, ChatMessage, Report, UserOTP
@@ -139,12 +128,12 @@ def create_app():
 
     return app
 
+
 def ensure_schema():
     """Forward-only migration for the existing database plus agency tenancy."""
     from .models import User, AgencyCompany
     inspector = inspect(db.engine)
 
-    # Existing vehicle index/migration.
     if inspector.has_table("vehicle"):
         cols = {c["name"] for c in inspector.get_columns("vehicle")}
         if "registration_suffix" not in cols:
@@ -156,15 +145,7 @@ def ensure_schema():
         except Exception:
             db.session.rollback()
 
-    # Add agency_id to every legacy compatibility table. Existing modern UUID tables
-    # (agencies, agency_members, banks, clients, vehicles, recovery_cases, status_history)
-    # are intentionally left untouched.
-    tenant_tables = [
-        "user", "user_otp", "bank", "vehicle", "data_assignment",
-        "status_history_legacy", "notification", "sync_mutation", "client",
-        "recovery_case", "app_file", "challan", "chat_conversation",
-        "chat_message", "report"
-    ]
+    tenant_tables = ["user", "user_otp", "bank", "vehicle", "data_assignment", "status_history_legacy", "notification", "sync_mutation", "client", "recovery_case", "app_file", "challan", "chat_conversation", "chat_message", "report"]
     for table in tenant_tables:
         if not inspect(db.engine).has_table(table):
             continue
@@ -178,9 +159,6 @@ def ensure_schema():
         except Exception:
             db.session.rollback()
 
-    # Keep a local integer compatibility id while mapping it to the user's
-    # existing UUID agency. This lets the current application remain intact
-    # without deleting or replacing the modern Supabase schema.
     if inspect(db.engine).has_table("agency_company"):
         cols = {c["name"] for c in inspect(db.engine).get_columns("agency_company")}
         if "supabase_agency_id" not in cols:
@@ -192,26 +170,14 @@ def ensure_schema():
         except Exception:
             db.session.rollback()
 
-    # Map every existing Supabase agency into the integer compatibility table.
-    # IMPORTANT: public.agencies.id is BIGINT, while AgencyCompany.supabase_agency_id
-    # is a UUID column in the existing compatibility schema. Never put the numeric
-    # agencies.id value into that UUID column. Match by stable name/code instead and
-    # keep the local AgencyCompany.id as the compatibility tenant key.
     try:
-        modern_agencies = db.session.execute(text(
-            "SELECT id, name, slug, phone, email, is_active FROM public.agencies ORDER BY created_at"
-        )).mappings().all()
+        modern_agencies = db.session.execute(text("SELECT id, name, slug, phone, email, is_active FROM public.agencies ORDER BY created_at")).mappings().all()
     except Exception:
         modern_agencies = []
     for ma in modern_agencies:
-        agency = AgencyCompany.query.filter(
-            db.or_(AgencyCompany.name == ma["name"], AgencyCompany.code == ma["slug"])
-        ).first()
+        agency = AgencyCompany.query.filter(db.or_(AgencyCompany.name == ma["name"], AgencyCompany.code == ma["slug"])).first()
         if not agency:
-            agency = AgencyCompany(
-                name=ma["name"], code=ma["slug"], phone=ma["phone"], email=ma["email"],
-                active=bool(ma["is_active"])
-            )
+            agency = AgencyCompany(name=ma["name"], code=ma["slug"], phone=ma["phone"], email=ma["email"], active=bool(ma["is_active"]))
             db.session.add(agency)
         else:
             agency.phone = ma["phone"]
@@ -219,7 +185,6 @@ def ensure_schema():
             agency.active = bool(ma["is_active"])
     db.session.commit()
 
-    # Map legacy users to their existing Supabase Auth identity and agency membership by email.
     if inspect(db.engine).has_table("user"):
         cols = {c["name"] for c in inspect(db.engine).get_columns("user")}
         if "supabase_user_id" not in cols:
@@ -233,27 +198,20 @@ def ensure_schema():
 
     try:
         mappings = db.session.execute(text("""
-            SELECT u.id AS legacy_user_id,
-                   u.supabase_user_id::text AS auth_user_id,
-                   am.role AS member_role,
-                   am.agency_id AS modern_agency_id,
-                   ag.name AS agency_name,
-                   ag.slug AS agency_slug
+            SELECT u.id AS legacy_user_id, u.supabase_user_id::text AS auth_user_id,
+                   am.role AS member_role, am.agency_id AS modern_agency_id,
+                   ag.name AS agency_name, ag.slug AS agency_slug
             FROM public."user" u
             JOIN public.agency_members am ON am.user_id = u.id
             JOIN public.agencies ag ON ag.id = am.agency_id AND ag.is_active = true
-            WHERE u.supabase_user_id IS NOT NULL
-              AND u.active = true
-              AND u.is_deleted = false
-              AND am.is_active = true
+            WHERE u.supabase_user_id IS NOT NULL AND u.active = true
+              AND u.is_deleted = false AND am.is_active = true
         """)).mappings().all()
     except Exception:
         mappings = []
     for m in mappings:
         u = User.query.get(m["legacy_user_id"])
-        agency = AgencyCompany.query.filter(
-            db.or_(AgencyCompany.name == m["agency_name"], AgencyCompany.code == m["agency_slug"])
-        ).first()
+        agency = AgencyCompany.query.filter(db.or_(AgencyCompany.name == m["agency_name"], AgencyCompany.code == m["agency_slug"])).first()
         if u and agency:
             u.supabase_user_id = m["auth_user_id"]
             u.agency_id = agency.id
@@ -263,23 +221,15 @@ def ensure_schema():
             elif role in {"agent", "repo_agent", "recovery_agent"}: u.role = "REPO_AGENT"
     db.session.commit()
 
-    # Do not guess an agency for legacy data. Existing rows remain untouched until
-    # an explicit migration/assignment is performed. This prevents accidental
-    # cross-agency exposure when more than one Supabase agency exists.
-
-    rows = db.session.execute(
-        text("SELECT id, registration_no FROM vehicle WHERE registration_suffix IS NULL OR registration_suffix='' LIMIT 5000")
-    ).fetchall()
+    rows = db.session.execute(text("SELECT id, registration_no FROM vehicle WHERE registration_suffix IS NULL OR registration_suffix='' LIMIT 5000")).fetchall()
     if rows:
         from .models import Vehicle
         import re
         for row in rows:
             digits = re.sub(r"\D", "", row.registration_no or "")
-            Vehicle.query.filter_by(id=row.id).update(
-                {"registration_suffix": digits[-4:] if len(digits) >= 4 else None},
-                synchronize_session=False,
-            )
+            Vehicle.query.filter_by(id=row.id).update({"registration_suffix": digits[-4:] if len(digits) >= 4 else None}, synchronize_session=False)
         db.session.commit()
+
 
 def seed():
     from .models import User, Bank, AgencyCompany
@@ -293,17 +243,29 @@ def seed():
 
     admin = User.query.filter_by(username="admin").first()
     if not admin:
-        admin = User(
-            agency_id=agency.id,
-            username="admin",
-            password_hash=generate_password_hash("admin123"),
-            full_name="System Administrator",
-            role="ADMIN",
-            active=True,
-        )
+        admin = User(agency_id=agency.id, username="admin", password_hash=generate_password_hash("admin123"), full_name="System Administrator", role="ADMIN", active=True)
         db.session.add(admin)
     elif admin.agency_id is None:
         admin.agency_id = agency.id
+
+    # Optional SUPER_ADMIN bootstrap. Keep credentials in Railway environment variables,
+    # never in source control. Set SUPER_ADMIN_USERNAME, SUPER_ADMIN_EMAIL and
+    # SUPER_ADMIN_PASSWORD once; startup creates or refreshes that account.
+    super_username = (os.getenv("SUPER_ADMIN_USERNAME") or "").strip()
+    super_email = (os.getenv("SUPER_ADMIN_EMAIL") or "").strip().lower() or None
+    super_password = os.getenv("SUPER_ADMIN_PASSWORD") or ""
+    if super_username and super_password:
+        super_admin = User.query.filter(db.or_(User.username == super_username, User.email == super_email)).first()
+        if not super_admin:
+            super_admin = User(agency_id=None, username=super_username, email=super_email, password_hash=generate_password_hash(super_password, method="scrypt:32768:8:1"), full_name="RecoveryOps Super Admin", role="SUPER_ADMIN", active=True, is_deleted=False)
+            db.session.add(super_admin)
+        else:
+            super_admin.role = "SUPER_ADMIN"
+            super_admin.active = True
+            super_admin.is_deleted = False
+            if super_email:
+                super_admin.email = super_email
+            super_admin.password_hash = generate_password_hash(super_password, method="scrypt:32768:8:1")
 
     if not Bank.query.first():
         db.session.add_all([
@@ -311,4 +273,3 @@ def seed():
             Bank(agency_id=agency.id, name="Sample Finance", code="SAMPLE", active=True),
         ])
     db.session.commit()
-
