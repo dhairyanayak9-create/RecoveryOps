@@ -115,46 +115,13 @@ def accessible_vehicle_query(user, write=False):
     q = Vehicle.query
 
     # ADMIN, STAFF and SUPER_ADMIN have full operational access.
-    # REPO_AGENT is intentionally NOT granted login access.
     if user.role in {"ADMIN", "STAFF", "SUPER_ADMIN"}:
         return q
 
-    vehicle_ids = db.session.query(
-        DataAssignment.vehicle_id
-    ).filter(
-        DataAssignment.user_id == user.id,
-        DataAssignment.active.is_(True),
-        DataAssignment.vehicle_id.isnot(None),
-        (
-            DataAssignment.permission == "UPDATE_STATUS"
-            if write
-            else DataAssignment.permission.in_(
-                ["READ", "UPDATE_STATUS"]
-            )
-        ),
-    )
-
-    bank_ids = db.session.query(
-        DataAssignment.bank_id
-    ).filter(
-        DataAssignment.user_id == user.id,
-        DataAssignment.active.is_(True),
-        DataAssignment.bank_id.isnot(None),
-        (
-            DataAssignment.permission == "UPDATE_STATUS"
-            if write
-            else DataAssignment.permission.in_(
-                ["READ", "UPDATE_STATUS"]
-            )
-        ),
-    )
-
-    return q.filter(
-        db.or_(
-            Vehicle.id.in_(vehicle_ids),
-            Vehicle.bank_id.in_(bank_ids),
-        )
-    )
+    # Legacy DataAssignment schema is incompatible with the
+    # production UUID-based public.data_assignment table.
+    # Do not query it here until the assignment bridge is migrated.
+    return q.filter(db.false())
 
 
 def can_access(user, vehicle, write=False):
