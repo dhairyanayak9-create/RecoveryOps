@@ -2364,11 +2364,11 @@ def _process_import_job(
                             reg
                         )
                     ),
-                    "chassis_no": chassis,
+                    "chassis_no": (chassis or "")[:150],
                     "engine_no": value(
                         row,
                         "engine_no"
-                    ),
+                    )[:150],
                     "customer_name": value(
                         row,
                         "customer_name"
