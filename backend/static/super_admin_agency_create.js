@@ -1,0 +1,10 @@
+(function(){
+function addAgencyCreate(){
+  if(typeof me==='undefined'||!me||me.role!=='SUPER_ADMIN')return;
+  const root=$('superadmin');if(!root||$('saCreateAgency'))return;
+  const panel=document.createElement('div');panel.id='saCreateAgency';panel.className='panel';panel.innerHTML=`<h3>Create New Agency + Admin</h3><div class="formgrid"><input id="saNewAgencyName" placeholder="Agency name"><input id="saNewAgencySlug" placeholder="Agency slug"><input id="saNewAgencyPhone" placeholder="Agency phone"><input id="saNewAgencyEmail" placeholder="Agency email"><input id="saNewAgencyAddress" placeholder="Address"><input id="saNewAdminName" placeholder="Admin full name"><input id="saNewAdminEmail" placeholder="Admin email"><input id="saNewAdminPhone" placeholder="Admin mobile"><input id="saNewAdminPassword" type="password" placeholder="Admin password (8+ chars)"></div><button onclick="createSuperAgency()">Create Agency</button>`;
+  root.insertBefore(panel,root.firstChild);
+}
+createSuperAgency=async function(){try{const body={agency_name:$('saNewAgencyName').value,slug:$('saNewAgencySlug').value,phone:$('saNewAgencyPhone').value,email:$('saNewAgencyEmail').value,address:$('saNewAgencyAddress').value,admin_name:$('saNewAdminName').value,admin_email:$('saNewAdminEmail').value,admin_phone:$('saNewAdminPhone').value,password:$('saNewAdminPassword').value};await api('/super-admin/agencies',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});showToast('Agency and admin created.');['saNewAgencyName','saNewAgencySlug','saNewAgencyPhone','saNewAgencyEmail','saNewAgencyAddress','saNewAdminName','saNewAdminEmail','saNewAdminPhone','saNewAdminPassword'].forEach(id=>$(id).value='');loadSuperAdmin()}catch(e){showToast(e.message,'error')}};
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',addAgencyCreate);else addAgencyCreate();
+})();
