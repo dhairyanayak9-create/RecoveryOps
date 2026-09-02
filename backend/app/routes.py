@@ -2173,7 +2173,7 @@ def _process_import_job(
                 }
 
                 for table in (
-                    "data_assignment",
+
                     "status_history_legacy",
                     "sync_mutation",
                     "recovery_case",
