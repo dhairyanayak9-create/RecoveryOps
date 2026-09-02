@@ -127,8 +127,10 @@ def create_app():
 
     from .models import User, Bank, Vehicle, DataAssignment, StatusHistory, Notification, SyncMutation, Client, RecoveryCase, AppFile, AgencyCompany, Challan, ChatConversation, ChatMessage, Report, UserOTP
     from .routes import api, web
+    from .super_admin import super_admin
     app.register_blueprint(api, url_prefix="/api")
     app.register_blueprint(web)
+    app.register_blueprint(super_admin)
 
     with app.app_context():
         db.create_all()
