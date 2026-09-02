@@ -168,7 +168,7 @@ def ensure_schema():
             continue
         cols = {c["name"] for c in inspect(db.engine).get_columns(table)}
         if "agency_id" not in cols:
-            db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN agency_id INTEGER"))
+            db.session.execute(text(f'ALTER TABLE "{table}" ADD COLUMN agency_id INTEGER'))
             db.session.commit()
         try:
             db.session.execute(text(f"CREATE INDEX ix_{table}_agency_id ON {table} (agency_id)"))
@@ -190,27 +190,28 @@ def ensure_schema():
         except Exception:
             db.session.rollback()
 
-    # Map every existing Supabase agency into the compatibility table.
+    # Map every existing Supabase agency into the integer compatibility table.
+    # IMPORTANT: public.agencies.id is BIGINT, while AgencyCompany.supabase_agency_id
+    # is a UUID column in the existing compatibility schema. Never put the numeric
+    # agencies.id value into that UUID column. Match by stable name/code instead and
+    # keep the local AgencyCompany.id as the compatibility tenant key.
     try:
         modern_agencies = db.session.execute(text(
-            "SELECT id::text AS id, name, slug, phone, email, is_active FROM public.agencies ORDER BY created_at"
+            "SELECT id, name, slug, phone, email, is_active FROM public.agencies ORDER BY created_at"
         )).mappings().all()
     except Exception:
         modern_agencies = []
     for ma in modern_agencies:
-        agency = AgencyCompany.query.filter_by(supabase_agency_id=ma["id"]).first()
-        if not agency:
-            agency = AgencyCompany.query.filter(
-                db.or_(AgencyCompany.name == ma["name"], AgencyCompany.code == ma["slug"])
-            ).first()
+        agency = AgencyCompany.query.filter(
+            db.or_(AgencyCompany.name == ma["name"], AgencyCompany.code == ma["slug"])
+        ).first()
         if not agency:
             agency = AgencyCompany(
                 name=ma["name"], code=ma["slug"], phone=ma["phone"], email=ma["email"],
-                active=bool(ma["is_active"]), supabase_agency_id=ma["id"]
+                active=bool(ma["is_active"])
             )
             db.session.add(agency)
         else:
-            agency.supabase_agency_id = ma["id"]
             agency.phone = ma["phone"]
             agency.email = ma["email"]
             agency.active = bool(ma["is_active"])
@@ -230,24 +231,33 @@ def ensure_schema():
 
     try:
         mappings = db.session.execute(text("""
-            SELECT u.id AS legacy_user_id, au.id::text AS auth_user_id, am.role AS member_role, am.agency_id::text AS supabase_agency_id
+            SELECT u.id AS legacy_user_id,
+                   u.supabase_user_id::text AS auth_user_id,
+                   am.role AS member_role,
+                   am.agency_id AS modern_agency_id,
+                   ag.name AS agency_name,
+                   ag.slug AS agency_slug
             FROM public."user" u
-            JOIN auth.users au ON lower(au.email) = lower(u.email)
-            JOIN public.agency_members am ON am.user_id = au.id
+            JOIN public.agency_members am ON am.user_id = u.id
             JOIN public.agencies ag ON ag.id = am.agency_id AND ag.is_active = true
-            WHERE u.email IS NOT NULL AND am.is_active = true
+            WHERE u.supabase_user_id IS NOT NULL
+              AND u.active = true
+              AND u.is_deleted = false
+              AND am.is_active = true
         """)).mappings().all()
     except Exception:
         mappings = []
     for m in mappings:
         u = User.query.get(m["legacy_user_id"])
-        agency = AgencyCompany.query.filter_by(supabase_agency_id=m["supabase_agency_id"]).first()
+        agency = AgencyCompany.query.filter(
+            db.or_(AgencyCompany.name == m["agency_name"], AgencyCompany.code == m["agency_slug"])
+        ).first()
         if u and agency:
             u.supabase_user_id = m["auth_user_id"]
             u.agency_id = agency.id
             role = (m["member_role"] or "").lower()
             if role == "admin": u.role = "ADMIN"
-            elif role == "staff": u.role = "OFFICE_STAFF"
+            elif role == "staff": u.role = "STAFF"
             elif role in {"agent", "repo_agent", "recovery_agent"}: u.role = "REPO_AGENT"
     db.session.commit()
 

@@ -38,7 +38,7 @@ async function search(auto=false){
   catch(e){showToast(e.message,'error')}
 }
 function renderVehicles(rows){
-  $('results').innerHTML=rows.length?`<div class="table-wrapper"><table><thead><tr><th>Registration</th><th>Customer</th><th>Account</th><th>Chassis</th><th>Type</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows.map(v=>`<tr class="vehicle-row" onclick="showVehicleDetails(${v.id})"><td><b>${esc(v.registration_no)}</b></td><td>${esc(v.customer_name)}</td><td>${esc(v.account_no)}</td><td>${esc(v.chassis_no)}</td><td>${esc(v.vehicle_type)}</td><td><span class="status-pill">${esc(v.status)}</span></td><td class="action-buttons" onclick="event.stopPropagation()"><button onclick="setStatus(${v.id},'HOLD')">Hold</button><button onclick="setStatus(${v.id},'IN_YARD')">Yard</button><button onclick="setStatus(${v.id},'RELEASE')">Release</button>${me?.role==='ADMIN'?`<button class="danger" onclick="deleteVehicle(${v.id})">Delete</button>`:''}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty-state">No records found.</div>'
+  $('results').innerHTML=rows.length?`<div class="table-wrapper"><table><thead><tr><th>Registration</th><th>Customer</th><th>Account</th><th>Chassis</th><th>Type</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows.map(v=>`<tr class="vehicle-row" onclick="showVehicleDetails(${JSON.stringify(v.id)})"><td><b>${esc(v.registration_no)}</b></td><td>${esc(v.customer_name)}</td><td>${esc(v.account_no)}</td><td>${esc(v.chassis_no)}</td><td>${esc(v.vehicle_type)}</td><td><span class="status-pill">${esc(v.status)}</span></td><td class="action-buttons" onclick="event.stopPropagation()"><button onclick="setStatus(${JSON.stringify(v.id)},'HOLD')">Hold</button><button onclick="setStatus(${JSON.stringify(v.id)},'IN_YARD')">Yard</button><button onclick="setStatus(${JSON.stringify(v.id)},'RELEASE')">Release</button>${me?.role==='ADMIN'?`<button class="danger" onclick="deleteVehicle(${JSON.stringify(v.id)})">Delete</button>`:''}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty-state">No records found.</div>'
 }
 async function showVehicleDetails(id){
   try{
@@ -96,11 +96,22 @@ async function upload(){
     const fileId=d.file_id;
     let done=null;
     for(let i=0;i<1800;i++){
-      let st=await api(`/files/${fileId}`);
+      let st;
+      try{
+        st=await api(`/files/${fileId}`);
+      }catch(err){
+        // A freshly queued job can briefly race the status read on a hosted DB.
+        // Retry 404s instead of turning a successful upload into a false failure.
+        if(String(err.message||'').includes('File not found') || String(err.message||'').includes('404')){
+          await new Promise(r=>setTimeout(r,1000));
+          continue;
+        }
+        throw err;
+      }
       let status=(st.status||'').toUpperCase();
       let pct=st.total>0?Math.min(99,Math.round((+st.record_count||0)*100/+st.total)):0;
       if(status==='IMPORTED'){done=st;bar.style.width='100%';$('uploadProgressText').textContent='Import completed • 100%';break}
-      if(status==='FAILED')throw Error(st.error||'File import failed.');
+      if(status==='FAILED')throw Error(st.error||'File import failed. Check server logs for the import error.');
       bar.style.width=Math.max(1,pct)+'%';
       $('uploadProgressText').textContent=pct>0?`Importing… ${pct}%`:'Importing…';
       await new Promise(r=>setTimeout(r,1000));
@@ -112,7 +123,7 @@ async function upload(){
     bar.style.width='0%';$('uploadProgressText').textContent='Upload/import failed';$('uploadOut').innerHTML=`<div class="message error">✕ ${esc(e.message)}</div>`;showToast(e.message,'error')
   }finally{setTimeout(()=>{btn.disabled=false;btn.textContent='Upload & Import'},500)}
 }
-async function loadBanks(){let d=await api('/banks');$('banksOut').innerHTML=`<div class="table-wrapper"><table><thead><tr><th>Name</th><th>Code</th><th>Phone</th><th>Email</th><th>Action</th></tr></thead><tbody>${d.map(b=>`<tr><td>${esc(b.name)}</td><td>${esc(b.code)}</td><td>${esc(b.phone)}</td><td>${esc(b.email)}</td><td class="action-buttons"><button onclick="editBank(${b.id})">Edit</button><button class="danger" onclick="deleteBank(${b.id})">Delete</button></td></tr>`).join('')}</tbody></table></div>`}
+async function loadBanks(){let d=await api('/banks');$('banksOut').innerHTML=`<div class="table-wrapper"><table><thead><tr><th>Name</th><th>Code</th><th>Phone</th><th>Email</th><th>Action</th></tr></thead><tbody>${d.map(b=>`<tr><td>${esc(b.name)}</td><td>${esc(b.code)}</td><td>${esc(b.phone)}</td><td>${esc(b.email)}</td><td class="action-buttons"><button onclick="editBank(${JSON.stringify(b.id)})">Edit</button><button class="danger" onclick="deleteBank(${JSON.stringify(b.id)})">Delete</button></td></tr>`).join('')}</tbody></table></div>`}
 async function addBank(){let body={name:$('bankName').value.trim(),code:$('bankCode').value.trim(),phone:$('bankPhone').value.trim(),email:$('bankEmail').value.trim()};if(!body.name||!body.code)return showToast('Bank name and code are required.','warning');try{await api('/banks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});['bankName','bankCode','bankPhone','bankEmail'].forEach(id=>$(id).value='');showToast('Bank created.');loadBanks()}catch(e){showToast(e.message,'error')}}
 async function editBank(id){let n=prompt('Bank name:');if(n===null)return;let c=prompt('Bank code:');if(c===null)return;let p=prompt('Phone:');if(p===null)return;let e=prompt('Email:');if(e===null)return;try{await api(`/banks/${id}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,code:c,phone:p,email:e})});showToast('Bank updated.');loadBanks()}catch(x){showToast(x.message,'error')}}
 async function deleteBank(id){if(!confirm('Delete this bank?'))return;try{await api(`/banks/${id}`,{method:'DELETE'});showToast('Bank deleted.');loadBanks()}catch(e){showToast(e.message,'error')}}
@@ -120,7 +131,7 @@ function startCreateUser(){pendingUser={username:$('newUsername').value.trim(),f
 async function requestUserOtp(){try{let d=await api('/users/request-otp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:pendingUser.email,phone:pendingUser.phone})});$('otpModal').classList.remove('hidden');$('otpInput').value='';$('otpMsg').textContent=d.otp_dev?`Development OTP: ${d.otp_dev}`:'OTP sent.';showToast('OTP generated.')}catch(e){showToast(e.message,'error')}}
 function closeOtpModal(){$('otpModal').classList.add('hidden')}
 async function verifyUserOtp(){let otp=$('otpInput').value.trim();if(!otp)return $('otpMsg').textContent='Enter OTP.';try{await api('/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...pendingUser,otp})});closeOtpModal();['newUsername','newName','newEmail','newPhone','newPassword'].forEach(id=>$(id).value='');showToast('User created successfully.');loadUsers()}catch(e){$('otpMsg').textContent=e.message}}
-async function loadUsers(){let d=await api('/users');$('usersOut').innerHTML=`<div class="table-wrapper"><table><thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Mobile</th><th>Role</th><th>Status</th><th>Device</th><th>Action</th></tr></thead><tbody>${d.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.full_name)}</td><td>${esc(u.email)}</td><td>${esc(u.phone)}</td><td>${esc(u.role)}</td><td><span class="status-pill ${u.active?'status-active':'status-paused'}">${u.is_deleted?'Deleted':u.active?'Active':'Paused'}</span></td><td>${u.device_id?'Linked':'Not linked'}</td><td>${u.role==='ADMIN'?'<span>Protected</span>':`<div class="action-buttons"><button onclick="editUser(${u.id})">Edit</button><button onclick="toggleUserStatus(${u.id},${!u.active})">${u.active?'Pause':'Activate'}</button><button onclick="removeUserDevice(${u.id})">Remove Device</button><button class="danger" onclick="deleteUser(${u.id})">Delete</button></div>`}</td></tr>`).join('')}</tbody></table></div>`}
+async function loadUsers(){let d=await api('/users');$('usersOut').innerHTML=`<div class="table-wrapper"><table><thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Mobile</th><th>Role</th><th>Status</th><th>Device</th><th>Action</th></tr></thead><tbody>${d.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.full_name)}</td><td>${esc(u.email)}</td><td>${esc(u.phone)}</td><td>${esc(u.role)}</td><td><span class="status-pill ${u.active?'status-active':'status-paused'}">${u.is_deleted?'Deleted':u.active?'Active':'Paused'}</span></td><td>${u.device_id?'Linked':'Not linked'}</td><td>${u.role==='SUPER_ADMIN'?'<span>Protected</span>':`<div class="action-buttons"><button onclick="editUser(${JSON.stringify(u.id)})">Edit</button><button onclick="toggleUserStatus(${JSON.stringify(u.id)},${!u.active})">${u.active?'Pause':'Activate'}</button><button onclick="removeUserDevice(${JSON.stringify(u.id)})">Remove Device</button><button class="danger" onclick="deleteUser(${JSON.stringify(u.id)})">Delete</button></div>`}</td></tr>`).join('')}</tbody></table></div>`}
 async function editUser(id){
   let u=(await api('/users')).find(x=>x.id===id);
   if(!u)return;
@@ -141,7 +152,7 @@ async function toggleUserStatus(id,active){try{await api(`/users/${id}`,{method:
 async function removeUserDevice(id){if(!confirm('Remove device access for this user?'))return;try{await api(`/users/${id}/device`,{method:'DELETE'});showToast('Device access removed.');loadUsers()}catch(e){showToast(e.message,'error')}}
 async function deleteUser(id){if(!confirm('Delete this user?'))return;try{await api(`/users/${id}`,{method:'DELETE'});showToast('User deleted.');loadUsers()}catch(e){showToast(e.message,'error')}}
 async function loadFiles(){let d=await api('/files');let id=document.querySelector('.page:not(.hidden)')?.id;let filter=id==='twowheeler'?'TWO':id==='fourwheeler'?'FOUR':id==='cv'?'CV':null;if(filter)d=d.filter(x=>(x.vehicle_type||'').toUpperCase().includes(filter));let target=id==='twowheeler'?'twoOut':id==='fourwheeler'?'fourOut':id==='cv'?'cvOut':'filesOut';if($(target))$(target).innerHTML=tableFiles(d)}
-function tableFiles(d){return d.length?`<div class="table-wrapper"><table><thead><tr><th>File</th><th>Vehicle Type</th><th>Bank</th><th>Records</th><th>Upload Date & Time</th><th>Status</th><th>Action</th></tr></thead><tbody>${d.map(x=>`<tr><td>${esc(x.filename)}</td><td>${esc(x.vehicle_type)}</td><td>${esc(x.bank_id)}</td><td>${(+x.record_count||0).toLocaleString()}</td><td>${formatDateTime(x.created_at)}</td><td>${esc(x.status)}</td><td><button class="danger" onclick="deleteFile(${x.id})">Delete</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="empty-state">No files uploaded yet.</div>'}
+function tableFiles(d){return d.length?`<div class="table-wrapper"><table><thead><tr><th>File</th><th>Vehicle Type</th><th>Bank</th><th>Records</th><th>Upload Date & Time</th><th>Status</th><th>Action</th></tr></thead><tbody>${d.map(x=>`<tr><td>${esc(x.filename)}</td><td>${esc(x.vehicle_type)}</td><td>${esc(x.bank_id)}</td><td>${(+x.record_count||0).toLocaleString()}</td><td>${formatDateTime(x.created_at)}</td><td>${esc(x.status)}</td><td><button class="danger" onclick="deleteFile(${JSON.stringify(x.id)})">Delete</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="empty-state">No files uploaded yet.</div>'}
 async function deleteFile(id){if(!confirm('Delete this file and imported records?'))return;try{await api(`/files/${id}`,{method:'DELETE'});showToast('File deleted.');loadFiles();loadDashboard()}catch(e){showToast(e.message,'error')}}
 function toggleExportBank(){$('exportBank').classList.toggle('hidden',$('exportScope').value!=='bank')}
 async function loadReports(){let d=await api('/reports');$('reportsOut').innerHTML=d.map(x=>`<div class="notice"><div><b>${esc(x.name)}</b><p>${esc(x.report_type)} · ${esc(x.status)} · ${formatDateTime(x.created_at)}</p></div></div>`).join('')||'<div class="empty-state">No reports created.</div>';loadBankSelectForReport()}
