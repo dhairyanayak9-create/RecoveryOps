@@ -91,3 +91,9 @@ try:
     from . import super_admin_sections
 except Exception:
     super_admin_sections = None
+
+# Load the bank-aware Super Admin upload endpoint.
+try:
+    from . import super_admin_upload_v2
+except Exception:
+    super_admin_upload_v2 = None
