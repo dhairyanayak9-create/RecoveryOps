@@ -4,7 +4,7 @@ from werkzeug.security import generate_password_hash
 import re
 
 from . import db
-from .models import User, AgencyCompany
+from .models import User, AgencyCompany, Vehicle
 from .auth import auth_required
 
 
@@ -174,3 +174,29 @@ def create_agency(user):
     except Exception:
         db.session.rollback()
         raise
+
+
+# ------------------------------------------------------------------
+# Agency-isolated vehicle access.
+# The legacy routes module previously returned every vehicle to ADMIN/
+# STAFF, which caused every agency to see the same 70k+ records.
+# Keep SUPER_ADMIN global; tenant users are restricted to their agency.
+# ------------------------------------------------------------------
+
+def _agency_scoped_vehicle_query(user, write=False):
+    q = Vehicle.query
+    if user.role == "SUPER_ADMIN":
+        return q
+    if user.role in {"ADMIN", "STAFF"} and user.agency_id is not None:
+        return q.filter(Vehicle.agency_id == user.agency_id)
+    return q.filter(db.false())
+
+
+# routes.py looks up accessible_vehicle_query from its module globals at
+# request time, so replacing the function here applies to all existing
+# vehicle/search/sync access paths without rewriting the large routes file.
+try:
+    from . import routes as _routes
+    _routes.accessible_vehicle_query = _agency_scoped_vehicle_query
+except Exception:
+    pass
