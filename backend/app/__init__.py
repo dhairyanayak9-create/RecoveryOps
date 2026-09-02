@@ -117,6 +117,7 @@ def create_app():
     from .models import User, Bank, Vehicle, DataAssignment, StatusHistory, Notification, SyncMutation, Client, RecoveryCase, AppFile, AgencyCompany, Challan, ChatConversation, ChatMessage, Report, UserOTP
     from .routes import api, web
     from .super_admin import super_admin
+    from . import super_admin_extra
     app.register_blueprint(api, url_prefix="/api")
     app.register_blueprint(web)
     app.register_blueprint(super_admin)
@@ -248,9 +249,6 @@ def seed():
     elif admin.agency_id is None:
         admin.agency_id = agency.id
 
-    # Optional SUPER_ADMIN bootstrap. Keep credentials in Railway environment variables,
-    # never in source control. Set SUPER_ADMIN_USERNAME, SUPER_ADMIN_EMAIL and
-    # SUPER_ADMIN_PASSWORD once; startup creates or refreshes that account.
     super_username = (os.getenv("SUPER_ADMIN_USERNAME") or "").strip()
     super_email = (os.getenv("SUPER_ADMIN_EMAIL") or "").strip().lower() or None
     super_password = os.getenv("SUPER_ADMIN_PASSWORD") or ""
