@@ -411,12 +411,19 @@ def login():
         # ADMIN       -> ALLOWED
         # STAFF       -> ALLOWED
         # SUPER_ADMIN -> ALLOWED
-        # REPO_AGENT  -> BLOCKED
+        # REPO_AGENT  -> APP ONLY
         # ----------------------------------------------------
+        device_id = str(data.get("device_id") or "").strip()
+
+        if user.role == "REPO_AGENT" and not device_id:
+            current_app.logger.warning("Web login blocked for REPO_AGENT user_id=%s", user.id)
+            return jsonify({"error": "REPO_AGENT login is available only from the application"}), 403
+
         if user.role not in {
             "ADMIN",
             "STAFF",
             "SUPER_ADMIN",
+            "REPO_AGENT",
         }:
             current_app.logger.warning(
                 "Login blocked: role=%s user_id=%s",
@@ -430,7 +437,7 @@ def login():
 
         # Web login does not use device binding.
         # Clear any legacy device binding.
-        if user.device_id:
+        if user.role != "REPO_AGENT" and user.device_id:
             user.device_id = None
 
         db.session.commit()
