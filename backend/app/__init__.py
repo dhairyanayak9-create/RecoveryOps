@@ -60,7 +60,6 @@ def create_app():
 
 def ensure_schema():
     if db.engine.dialect.name!='postgresql':return
-    from .models import User,AgencyCompany
     try:
         agencies=db.session.execute(text('SELECT id,name,slug,phone,email,is_active FROM public.agencies ORDER BY id')).mappings().all()
         for a in agencies:
@@ -72,16 +71,19 @@ def ensure_schema():
     except Exception:db.session.rollback()
 
 def seed():
-    from .models import User,AgencyCompany
+    # Production must remain control-plane-only until SUPER_ADMIN provisions an agency.
+    # Never recreate the old Demo Recovery Agency or a default admin automatically.
+    from .models import User
     from werkzeug.security import generate_password_hash
-    agency=AgencyCompany.query.order_by(AgencyCompany.id.asc()).first()
-    if not agency:agency=AgencyCompany(name='Demo Recovery Agency',code='DEMO');db.session.add(agency);db.session.flush()
-    admin=User.query.filter_by(username='admin').first()
-    if not admin:db.session.add(User(agency_id=agency.id,username='admin',password_hash=generate_password_hash('admin123'),full_name='System Administrator',role='ADMIN',active=True))
-    elif admin.agency_id is None:admin.agency_id=agency.id
     su=(os.getenv('SUPER_ADMIN_USERNAME') or '').strip();se=(os.getenv('SUPER_ADMIN_EMAIL') or '').strip().lower() or None;sp=os.getenv('SUPER_ADMIN_PASSWORD') or ''
-    if su and sp:
+    if not su or not sp:
+        return
+    try:
         sa=User.query.filter(db.or_(User.username==su,User.email==se)).first()
-        if not sa:db.session.add(User(agency_id=None,username=su,email=se,password_hash=generate_password_hash(sp,method='scrypt:32768:8:1'),full_name='RecoveryOps Super Admin',role='SUPER_ADMIN',active=True,is_deleted=False))
-        else:sa.role='SUPER_ADMIN';sa.active=True;sa.is_deleted=False;sa.email=se or sa.email;sa.password_hash=generate_password_hash(sp,method='scrypt:32768:8:1')
-    db.session.commit()
+        if not sa:
+            db.session.add(User(agency_id=None,username=su,email=se,password_hash=generate_password_hash(sp,method='scrypt:32768:8:1'),full_name='RecoveryOps Super Admin',role='SUPER_ADMIN',active=True,is_deleted=False))
+        else:
+            sa.role='SUPER_ADMIN';sa.active=True;sa.is_deleted=False;sa.email=se or sa.email;sa.password_hash=generate_password_hash(sp,method='scrypt:32768:8:1');sa.agency_id=None
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
