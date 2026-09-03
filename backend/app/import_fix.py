@@ -114,44 +114,44 @@ def _row_number(row, mapping, key):
 
 
 def _delete_previous_bank_uploads(bank_id, current_file_id):
-    """Remove all previous uploads for this bank inside the active tenant.
+    """Replace previous uploads for this bank using set-based SQL deletes."""
+    old_ids = [
+        row[0]
+        for row in db.session.execute(
+            text("SELECT id FROM app_file WHERE bank_id = :bank_id"),
+            {"bank_id": bank_id},
+        ).all()
+        if row[0] != current_file_id
+    ]
 
-    The tenant schema is already selected before this function runs, so an
-    agency_id predicate is intentionally not used here. This also handles
-    older files created with the legacy agency id while the current session
-    resolves the tenant through agency_tenants.
-    """
-    old_files = AppFile.query.filter(AppFile.bank_id == bank_id).all()
+    if not old_ids:
+        return
 
-    for old_file in old_files:
-        params = {"file_id": old_file.id}
+    # One set-based vehicle subquery replaces the previous per-file loop.
+    placeholders = ", ".join(f":fid{i}" for i in range(len(old_ids)))
+    params = {f"fid{i}": value for i, value in enumerate(old_ids)}
+    vehicle_subquery = f"SELECT id FROM vehicle WHERE source_file_id IN ({placeholders})"
 
-        # Remove every known vehicle-dependent record before deleting the
-        # vehicles themselves. data_assignment was previously missing here,
-        # which could leave the old upload in place when assignments existed.
-        for table in (
-            "data_assignment",
-            "status_history_legacy",
-            "sync_mutation",
-            "recovery_case",
-            "challan",
-        ):
-            db.session.execute(
-                text(
-                    f"DELETE FROM {table} WHERE vehicle_id IN ("
-                    "SELECT id FROM vehicle WHERE source_file_id = :file_id)"
-                ),
-                params,
-            )
-
+    for table in (
+        "data_assignment",
+        "status_history_legacy",
+        "sync_mutation",
+        "recovery_case",
+        "challan",
+    ):
         db.session.execute(
-            text("DELETE FROM vehicle WHERE source_file_id = :file_id"),
+            text(f"DELETE FROM {table} WHERE vehicle_id IN ({vehicle_subquery})"),
             params,
         )
 
-        if old_file.id != current_file_id:
-            db.session.delete(old_file)
-
+    db.session.execute(
+        text(f"DELETE FROM vehicle WHERE source_file_id IN ({placeholders})"),
+        params,
+    )
+    db.session.execute(
+        text(f"DELETE FROM app_file WHERE id IN ({placeholders})"),
+        params,
+    )
     db.session.commit()
 
 
@@ -165,7 +165,7 @@ def _process_import_job_streaming(
     uploaded_by,
     agency_id,
 ):
-    """Memory-safe import worker with same-bank replacement semantics."""
+    """Memory-safe, single-pass streaming import worker."""
     with app.app_context():
         g.agency_id = agency_id
         af = None
@@ -180,23 +180,16 @@ def _process_import_job_streaming(
             if not af:
                 return
 
-            try:
-                first_mapping, _ = next(_iter_rows(temp_path, filename))
-            except StopIteration:
-                raise ValueError("File is empty or contains no data rows.")
+            requested_vehicle_type = _string(vehicle_type)
+            mapping = None
+            created = 0
+            dup = 0
+            invalid = 0
+            batch = []
+            BATCH_SIZE = 5000
 
-            if not any(
-                k in first_mapping
-                for k in ("registration_no", "chassis_no", "account_no", "loan_no")
-            ):
-                raise ValueError(
-                    "File must contain Registration Number, Chassis Number, Account Number, or Loan Number column."
-                )
-
-            _delete_previous_bank_uploads(bank_id, af.id)
-
-            # After replacement, only records from other banks remain in the
-            # tenant. Keep these sets for memory-safe duplicate detection.
+            # Existing identifiers are loaded once. The new file itself is
+            # checked incrementally, so there is no second Excel scan.
             existing_regs = {
                 x[0]
                 for x in Vehicle.query.with_entities(Vehicle.registration_no)
@@ -222,14 +215,17 @@ def _process_import_job_streaming(
                 .all()
             }
 
-            created = 0
-            dup = 0
-            invalid = 0
-            batch = []
-            requested_vehicle_type = _string(vehicle_type)
-            BATCH_SIZE = 1000
+            for row_mapping, row in _iter_rows(temp_path, filename):
+                if mapping is None:
+                    mapping = row_mapping
+                    if not any(
+                        k in mapping
+                        for k in ("registration_no", "chassis_no", "account_no", "loan_no")
+                    ):
+                        raise ValueError(
+                            "File must contain Registration Number, Chassis Number, Account Number, or Loan Number column."
+                        )
 
-            for mapping, row in _iter_rows(temp_path, filename):
                 reg = _row_value(row, mapping, "registration_no")
                 chassis = _row_value(row, mapping, "chassis_no")
                 account = _row_value(row, mapping, "account_no")
@@ -282,11 +278,6 @@ def _process_import_job_streaming(
                     db.session.bulk_insert_mappings(Vehicle, batch)
                     db.session.commit()
                     batch = []
-                    af = db.session.get(AppFile, file_id)
-                    if af:
-                        af.record_count = created
-                        af.status = "IMPORTING"
-                        db.session.commit()
 
             if batch:
                 db.session.bulk_insert_mappings(Vehicle, batch)
