@@ -49,42 +49,33 @@ def create_app():
     from .models import User,Bank,Vehicle,DataAssignment,StatusHistory,Notification,SyncMutation,Client,RecoveryCase,AppFile,AgencyCompany,Challan,ChatConversation,ChatMessage,Report,UserOTP
     from .routes import api,web
     from .super_admin import super_admin
-    from . import super_admin_extra,super_admin_control_v4,super_admin_routes_v5
+    from . import super_admin_extra,super_admin_control_v4,super_admin_routes_v5,super_admin_route_compat
     app.register_blueprint(api,url_prefix='/api');app.register_blueprint(web);app.register_blueprint(super_admin)
     from .tenant_security import install as install_tenant_security
-    install_tenant_security(app);super_admin_control_v4.install(app);super_admin_routes_v5.install(app)
+    install_tenant_security(app);super_admin_control_v4.install(app);super_admin_routes_v5.install(app);super_admin_route_compat.install(app)
     with app.app_context():
         if database_url.startswith('sqlite'):db.create_all()
         ensure_schema();seed()
     return app
 
 def ensure_schema():
-    # Production PostgreSQL schema is migration-owned. Do not run table-wide
-    # inspection/ALTER/index creation or row-by-row backfills on every worker boot.
     if db.engine.dialect.name!='postgresql':return
     from .models import User,AgencyCompany
     try:
         agencies=db.session.execute(text('SELECT id,name,slug,phone,email,is_active FROM public.agencies ORDER BY id')).mappings().all()
         for a in agencies:
             c=db.session.execute(text('SELECT id FROM public.agency_company WHERE name=:n OR code=:s LIMIT 1'),{'n':a['name'],'s':a['slug']}).scalar()
-            if not c:
-                db.session.execute(text('INSERT INTO public.agency_company(name,code,phone,email,active,supabase_agency_id,created_at) VALUES(:n,:s,:p,:e,:x,:sid,now())'),{'n':a['name'],'s':a['slug'],'p':a['phone'],'e':a['email'],'x':bool(a['is_active']),'sid':str(a['id'])})
-            else:
-                db.session.execute(text('UPDATE public.agency_company SET phone=:p,email=:e,active=:x WHERE id=:id'),{'id':c,'p':a['phone'],'e':a['email'],'x':bool(a['is_active'])})
-        db.session.commit()
+            if not c:db.session.execute(text('INSERT INTO public.agency_company(name,code,phone,email,active,supabase_agency_id,created_at) VALUES(:n,:s,:p,:e,:x,:sid,now())'),{'n':a['name'],'s':a['slug'],'p':a['phone'],'e':a['email'],'x':bool(a['is_active']),'sid':str(a['id'])})
+            else:db.session.execute(text('UPDATE public.agency_company SET phone=:p,email=:e,active=:x WHERE id=:id'),{'id':c,'p':a['phone'],'e':a['email'],'x':bool(a['is_active'])})
         db.session.execute(text('''UPDATE public."user" u SET agency_id=amap.legacy_id FROM (SELECT am.user_id,coalesce(c.id,am.agency_id) legacy_id FROM public.agency_members am LEFT JOIN public.agencies a ON a.id=am.agency_id LEFT JOIN public.agency_company c ON c.name=a.name OR c.code=a.slug WHERE am.is_active=true) amap WHERE u.id=amap.user_id AND u.agency_id IS DISTINCT FROM amap.legacy_id'''))
         db.session.commit()
-    except Exception:
-        db.session.rollback()
+    except Exception:db.session.rollback()
 
 def seed():
-    # Seed only control-plane records. Tenant business data is created in its
-    # tenant schema by provisioning; never seed banks/vehicles into public.
     from .models import User,AgencyCompany
     from werkzeug.security import generate_password_hash
     agency=AgencyCompany.query.order_by(AgencyCompany.id.asc()).first()
-    if not agency:
-        agency=AgencyCompany(name='Demo Recovery Agency',code='DEMO');db.session.add(agency);db.session.flush()
+    if not agency:agency=AgencyCompany(name='Demo Recovery Agency',code='DEMO');db.session.add(agency);db.session.flush()
     admin=User.query.filter_by(username='admin').first()
     if not admin:db.session.add(User(agency_id=agency.id,username='admin',password_hash=generate_password_hash('admin123'),full_name='System Administrator',role='ADMIN',active=True))
     elif admin.agency_id is None:admin.agency_id=agency.id
