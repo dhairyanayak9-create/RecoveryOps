@@ -7,11 +7,14 @@ from .auth import auth_required
 
 
 def _legacy_agency_id(agency_id):
-    name = db.session.execute(text("SELECT name FROM public.agencies WHERE id=:id"), {"id": agency_id}).scalar()
-    if not name:
-        return None
-    company = AgencyCompany.query.filter_by(name=name).first()
-    return company.id if company else agency_id
+    row = db.session.execute(text("""
+        SELECT a.name, COALESCE(c.id,a.id) AS legacy_id
+        FROM public.agencies a
+        LEFT JOIN public.agency_company c ON c.name=a.name OR c.code=a.slug
+        WHERE a.id=:id
+        LIMIT 1
+    """), {"id": agency_id}).mappings().first()
+    return int(row["legacy_id"]) if row else None
 
 
 def _vehicle_json(v):
@@ -86,13 +89,11 @@ def update_agency_bank(user, agency_id, bank_id):
         if field in d:setattr(b,field,d[field])
     db.session.commit();return jsonify({"id":b.id,"name":b.name,"code":b.code,"phone":b.phone,"email":b.email,"active":bool(b.active)})
 
-# Load additional section/file endpoints after the base app imports this module.
 try:
     from . import super_admin_sections
 except Exception:
     super_admin_sections = None
 
-# Load the bank-aware Super Admin upload endpoint.
 try:
     from . import super_admin_upload_v2
 except Exception:
