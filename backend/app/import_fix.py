@@ -1,13 +1,12 @@
 import csv
 import os
 import re
-from datetime import datetime, timezone
 
 from flask import g, current_app
 from sqlalchemy import text
 
 from . import db
-from .models import AppFile, Vehicle, DataAssignment, StatusHistory, SyncMutation, RecoveryCase, Challan, Notification, User
+from .models import AppFile, Vehicle, Notification, User
 from .routes import get_registration_suffix
 
 
@@ -114,6 +113,48 @@ def _row_number(row, mapping, key):
     return _number(row.get(col)) if col is not None else None
 
 
+def _delete_previous_bank_uploads(bank_id, current_file_id):
+    """Remove all previous uploads for this bank inside the active tenant.
+
+    The tenant schema is already selected before this function runs, so an
+    agency_id predicate is intentionally not used here. This also handles
+    older files created with the legacy agency id while the current session
+    resolves the tenant through agency_tenants.
+    """
+    old_files = AppFile.query.filter(AppFile.bank_id == bank_id).all()
+
+    for old_file in old_files:
+        params = {"file_id": old_file.id}
+
+        # Remove every known vehicle-dependent record before deleting the
+        # vehicles themselves. data_assignment was previously missing here,
+        # which could leave the old upload in place when assignments existed.
+        for table in (
+            "data_assignment",
+            "status_history_legacy",
+            "sync_mutation",
+            "recovery_case",
+            "challan",
+        ):
+            db.session.execute(
+                text(
+                    f"DELETE FROM {table} WHERE vehicle_id IN ("
+                    "SELECT id FROM vehicle WHERE source_file_id = :file_id)"
+                ),
+                params,
+            )
+
+        db.session.execute(
+            text("DELETE FROM vehicle WHERE source_file_id = :file_id"),
+            params,
+        )
+
+        if old_file.id != current_file_id:
+            db.session.delete(old_file)
+
+    db.session.commit()
+
+
 def _process_import_job_streaming(
     app,
     file_id,
@@ -124,7 +165,7 @@ def _process_import_job_streaming(
     uploaded_by,
     agency_id,
 ):
-    """Memory-safe replacement for the legacy pandas import worker."""
+    """Memory-safe import worker with same-bank replacement semantics."""
     with app.app_context():
         g.agency_id = agency_id
         af = None
@@ -144,45 +185,41 @@ def _process_import_job_streaming(
             except StopIteration:
                 raise ValueError("File is empty or contains no data rows.")
 
-            if not any(k in first_mapping for k in ("registration_no", "chassis_no", "account_no", "loan_no")):
+            if not any(
+                k in first_mapping
+                for k in ("registration_no", "chassis_no", "account_no", "loan_no")
+            ):
                 raise ValueError(
                     "File must contain Registration Number, Chassis Number, Account Number, or Loan Number column."
                 )
 
-            old_files = AppFile.query.filter(
-                AppFile.bank_id == bank_id,
-                AppFile.agency_id == agency_id,
-            ).all()
+            _delete_previous_bank_uploads(bank_id, af.id)
 
-            for old_file in old_files:
-                params = {"file_id": old_file.id}
-                for table in ("status_history_legacy", "sync_mutation", "recovery_case", "challan"):
-                    db.session.execute(
-                        text(
-                            f"DELETE FROM {table} WHERE vehicle_id IN ("
-                            "SELECT id FROM vehicle WHERE source_file_id = :file_id)"
-                        ),
-                        params,
-                    )
-                db.session.execute(
-                    text("DELETE FROM vehicle WHERE source_file_id = :file_id"),
-                    params,
-                )
-                if old_file.id != af.id:
-                    db.session.delete(old_file)
-            db.session.commit()
-
+            # After replacement, only records from other banks remain in the
+            # tenant. Keep these sets for memory-safe duplicate detection.
             existing_regs = {
-                x[0] for x in Vehicle.query.with_entities(Vehicle.registration_no).filter(Vehicle.registration_no.isnot(None)).all()
+                x[0]
+                for x in Vehicle.query.with_entities(Vehicle.registration_no)
+                .filter(Vehicle.registration_no.isnot(None))
+                .all()
             }
             existing_chassis = {
-                x[0] for x in Vehicle.query.with_entities(Vehicle.chassis_no).filter(Vehicle.chassis_no.isnot(None)).all()
+                x[0]
+                for x in Vehicle.query.with_entities(Vehicle.chassis_no)
+                .filter(Vehicle.chassis_no.isnot(None))
+                .all()
             }
             existing_accounts = {
-                x[0] for x in Vehicle.query.with_entities(Vehicle.account_no).filter(Vehicle.account_no.isnot(None)).all()
+                x[0]
+                for x in Vehicle.query.with_entities(Vehicle.account_no)
+                .filter(Vehicle.account_no.isnot(None))
+                .all()
             }
             existing_loans = {
-                x[0] for x in Vehicle.query.with_entities(Vehicle.loan_no).filter(Vehicle.loan_no.isnot(None)).all()
+                x[0]
+                for x in Vehicle.query.with_entities(Vehicle.loan_no)
+                .filter(Vehicle.loan_no.isnot(None))
+                .all()
             }
 
             created = 0
@@ -248,6 +285,7 @@ def _process_import_job_streaming(
                     af = db.session.get(AppFile, file_id)
                     if af:
                         af.record_count = created
+                        af.status = "IMPORTING"
                         db.session.commit()
 
             if batch:
@@ -279,6 +317,15 @@ def _process_import_job_streaming(
                         ],
                     )
                     db.session.commit()
+
+            current_app.logger.info(
+                "File import completed: bank=%s file=%s created=%s duplicates=%s invalid=%s replaced_previous=true",
+                bank_id,
+                file_id,
+                created,
+                dup,
+                invalid,
+            )
 
         except Exception:
             db.session.rollback()
