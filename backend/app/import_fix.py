@@ -1,8 +1,7 @@
 import os
 import re
-import time
 import pandas as pd
-from flask import g, jsonify, appcontext_pushed
+from flask import g, appcontext_pushed
 from sqlalchemy import text
 from contextvars import ContextVar
 
@@ -56,7 +55,7 @@ def _normalize_headers(temp_path):
 
 
 def install(app):
-    """Patch the legacy import without replacing the existing route source."""
+    """Patch the legacy import worker without blocking the HTTP request."""
     from . import routes
 
     worker_agency = ContextVar("recoveryops_import_agency", default=None)
@@ -106,39 +105,7 @@ def install(app):
         fixed_worker._recoveryops_fixed = True
         routes._process_import_job = fixed_worker
 
-    endpoint = "api.import_file"
-    original_view = app.view_functions.get(endpoint)
-    if original_view and not getattr(original_view, "_recoveryops_wait_import", False):
-        def wait_for_import(*args, **kwargs):
-            response = original_view(*args, **kwargs)
-            flask_response = app.make_response(response)
-            payload = flask_response.get_json(silent=True) or {}
-            if flask_response.status_code != 202 or not payload.get("file_id"):
-                return flask_response
-
-            file_id = payload["file_id"]
-            deadline = time.monotonic() + int(os.getenv("IMPORT_SYNC_TIMEOUT", "900"))
-            while time.monotonic() < deadline:
-                try:
-                    final = routes.AppFile.query.get(file_id)
-                    status = final.status if final else None
-                    if status in {"IMPORTED", "FAILED"}:
-                        count = int(final.record_count or 0)
-                        return jsonify({
-                            "file_id": file_id,
-                            "status": status,
-                            "record_count": count,
-                            "message": "Import completed successfully." if status == "IMPORTED" else "Import failed. Check server logs for details.",
-                        }), (200 if status == "IMPORTED" else 500)
-                except Exception:
-                    db.session.rollback()
-                time.sleep(1)
-
-            return jsonify({
-                "file_id": file_id,
-                "status": "IMPORTING",
-                "message": "Import is still running. Check File Management for the final status.",
-            }), 202
-
-        wait_for_import._recoveryops_wait_import = True
-        app.view_functions[endpoint] = wait_for_import
+    # IMPORTANT: keep the existing /api/files/import endpoint asynchronous.
+    # The frontend already polls /api/files/<id>. Waiting inside the HTTP
+    # request for a large Excel import can hit Railway's edge/proxy timeout
+    # and surface as HTTP 502 even while the import worker is still healthy.
