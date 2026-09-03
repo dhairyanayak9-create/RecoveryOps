@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from flask import jsonify
 from sqlalchemy import text
@@ -7,6 +8,7 @@ from .auth import current_user
 
 UPLOAD_SUFFIXES = ('.xlsx', '.xls', '.csv')
 MAX_TEMP_AGE_SECONDS = int(os.getenv('RECOVERYOPS_TEMP_MAX_AGE', '1800'))
+CLEANUP_INTERVAL_SECONDS = int(os.getenv('RECOVERYOPS_TEMP_CLEANUP_INTERVAL', '600'))
 
 
 def _sa():
@@ -49,8 +51,7 @@ def _file_delete(file_id, agency_id=None):
         return jsonify(error='Super Admin access required'), 403
 
     try:
-        maps = _schema_map()
-        for m in maps:
+        for m in _schema_map():
             if agency_id is not None and int(m['modern_id']) != int(agency_id):
                 continue
             target = _delete_file(str(m['schema_name']), int(m['legacy_id']), file_id)
@@ -82,6 +83,17 @@ def _cleanup_temp_files():
     return removed
 
 
+def _cleanup_loop(app):
+    while True:
+        time.sleep(CLEANUP_INTERVAL_SECONDS)
+        try:
+            removed = _cleanup_temp_files()
+            if removed:
+                app.logger.info('Removed %s stale upload temp files', removed)
+        except Exception:
+            app.logger.exception('Background upload temp cleanup failed')
+
+
 def _install_indexes():
     for m in _schema_map():
         s = str(m['schema_name'])
@@ -109,6 +121,33 @@ def _install_indexes():
             db.session.rollback()
 
 
+def _fast_dashboard(user):
+    if not user or not user.active or getattr(user, 'is_deleted', False):
+        return jsonify(error='Authentication required'), 401
+    if user.role not in {'ADMIN', 'STAFF', 'SUPER_ADMIN'}:
+        return jsonify(total=0, accessible_total=0, by_status={'PENDING': 0, 'HOLD': 0, 'IN_YARD': 0, 'RELEASE': 0})
+
+    row = db.session.execute(text('''
+        SELECT count(*) AS total,
+               count(*) FILTER (WHERE status='PENDING') AS pending,
+               count(*) FILTER (WHERE status='HOLD') AS hold,
+               count(*) FILTER (WHERE status='IN_YARD') AS in_yard,
+               count(*) FILTER (WHERE status='RELEASE') AS release
+        FROM vehicle
+    ''')).mappings().one()
+    total = int(row['total'] or 0)
+    return jsonify(
+        total=total,
+        accessible_total=total,
+        by_status={
+            'PENDING': int(row['pending'] or 0),
+            'HOLD': int(row['hold'] or 0),
+            'IN_YARD': int(row['in_yard'] or 0),
+            'RELEASE': int(row['release'] or 0),
+        },
+    )
+
+
 def install(app):
     removed = _cleanup_temp_files()
     if removed:
@@ -120,9 +159,15 @@ def install(app):
         except Exception:
             app.logger.exception('Runtime index setup failed')
 
+    # Keep stale uploads from accumulating even when no new deployment occurs.
+    t = threading.Thread(target=_cleanup_loop, args=(app,), daemon=True, name='recoveryops-temp-cleaner')
+    t.start()
+
     for rule in list(app.url_map.iter_rules()):
         if rule.rule == '/api/super-admin/agencies/<int:agency_id>/files/<int:file_id>' and 'DELETE' in rule.methods:
             app.view_functions[rule.endpoint] = lambda agency_id, file_id: _file_delete(file_id, agency_id)
+        if rule.rule == '/api/dashboard' and 'GET' in rule.methods:
+            app.view_functions[rule.endpoint] = _fast_dashboard
 
     if 'storage_fix_file_delete' not in app.view_functions:
         app.add_url_rule('/api/super-admin/files/<int:file_id>', 'storage_fix_file_delete', _file_delete, methods=['DELETE'])
