@@ -1,4 +1,5 @@
 import os
+import re
 from flask import Flask, g
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
@@ -14,6 +15,29 @@ def _agency_id():
 
 def _install_tenant_guards():
     from .models import TENANT_MODELS
+
+    # Flask request hooks set search_path during normal HTTP requests.
+    # Background import workers do not run those hooks, so establish the
+    # tenant schema whenever a SQLAlchemy transaction begins and g.agency_id
+    # is available. This keeps worker ORM queries on the same isolated schema
+    # as the request that created the import record.
+    @event.listens_for(db.session,'after_begin')
+    def _set_tenant_search_path(session, transaction, connection):
+        aid = _agency_id()
+        if not aid:
+            return
+        try:
+            schema = connection.execute(
+                text("SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id=:aid LIMIT 1"),
+                {"aid": int(aid)},
+            ).scalar()
+            if schema and re.fullmatch(r"recovery_agency_[0-9]+", str(schema)):
+                connection.exec_driver_sql(f'SET search_path TO "{schema}", public')
+        except Exception:
+            # Never make a transaction unusable solely because the optional
+            # tenant search_path lookup failed; normal request guards remain.
+            pass
+
     @event.listens_for(db.session,'do_orm_execute')
     def _scope(execute_state):
         aid=_agency_id()
@@ -74,10 +98,8 @@ def ensure_schema():
 
 def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
     """Create one isolated business schema and copy the legacy table shapes into it."""
-    if conn is None:
-        conn=db.session.connection()
-    if conn.dialect.name != 'postgresql':
-        return None
+    if conn is None:conn=db.session.connection()
+    if conn.dialect.name != 'postgresql':return None
     schema=f'recovery_agency_{int(modern_agency_id)}'
     tables=('bank','client','vehicle','recovery_case','app_file','data_assignment','status_history_legacy','notification','sync_mutation','challan','chat_conversation','chat_message','report')
     conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
@@ -92,15 +114,12 @@ def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
 
 def _install_agency_provision_hook(AgencyCompany):
     global _agency_provision_hook_installed
-    if _agency_provision_hook_installed:
-        return
+    if _agency_provision_hook_installed:return
     @event.listens_for(AgencyCompany,'after_insert')
     def _after_agency_company_insert(mapper,connection,target):
-        if connection.dialect.name!='postgresql':
-            return
+        if connection.dialect.name!='postgresql':return
         row=connection.execute(text('SELECT id FROM public.agencies WHERE name=:n OR slug=:s LIMIT 1'),{'n':target.name,'s':target.code}).scalar()
-        if row is not None:
-            _provision_tenant_schema(int(row),int(target.id),conn=connection)
+        if row is not None:_provision_tenant_schema(int(row),int(target.id),conn=connection)
     _agency_provision_hook_installed=True
 
 def seed():
@@ -109,14 +128,11 @@ def seed():
     from .models import User
     from werkzeug.security import generate_password_hash
     su=(os.getenv('SUPER_ADMIN_USERNAME') or '').strip();se=(os.getenv('SUPER_ADMIN_EMAIL') or '').strip().lower() or None;sp=os.getenv('SUPER_ADMIN_PASSWORD') or ''
-    if not su or not sp:
-        return
+    if not su or not sp:return
     try:
         sa=User.query.filter(db.or_(User.username==su,User.email==se)).first()
-        if not sa:
-            db.session.add(User(agency_id=None,username=su,email=se,password_hash=generate_password_hash(sp,method='scrypt:32768:8:1'),full_name='RecoveryOps Super Admin',role='SUPER_ADMIN',active=True,is_deleted=False))
+        if not sa:db.session.add(User(agency_id=None,username=su,email=se,password_hash=generate_password_hash(sp,method='scrypt:32768:8:1'),full_name='RecoveryOps Super Admin',role='SUPER_ADMIN',active=True,is_deleted=False))
         else:
             sa.role='SUPER_ADMIN';sa.active=True;sa.is_deleted=False;sa.email=se or sa.email;sa.password_hash=generate_password_hash(sp,method='scrypt:32768:8:1');sa.agency_id=None
         db.session.commit()
-    except Exception:
-        db.session.rollback()
+    except Exception:db.session.rollback()
