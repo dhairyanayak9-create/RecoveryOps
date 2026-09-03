@@ -4,7 +4,10 @@ import jwt
 from datetime import datetime, timedelta, timezone
 from .models import User, AgencyCompany
 from . import db
-from sqlalchemy import text
+from sqlalchemy import text, event
+
+
+_tenant_routing_installed = set()
 
 
 def _resolve_legacy_agency(user):
@@ -37,6 +40,45 @@ def _resolve_legacy_agency(user):
         return user.agency_id
 
 
+def _install_tenant_sql_routing():
+    """Route every PostgreSQL statement to the authenticated agency schema.
+
+    The schema name is read only from the server-side agency_tenants mapping;
+    client supplied schema names are never accepted. public remains second so
+    the control plane (user/agencies/auth mappings) stays available.
+    """
+    engine = db.engine
+    key = id(engine)
+    if key in _tenant_routing_installed:
+        return
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _route_tenant_sql(connection, cursor, statement, parameters, context, executemany):
+        try:
+            agency_id = getattr(g, "agency_id", None)
+        except RuntimeError:
+            agency_id = None
+
+        schema = None
+        if agency_id is not None:
+            schema = connection.info.get("recoveryops_tenant_schema")
+            if schema is None:
+                row = connection.exec_driver_sql(
+                    "SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id = %s LIMIT 1",
+                    (int(agency_id),),
+                ).fetchone()
+                if row and str(row[0]).startswith("recovery_agency_"):
+                    schema = str(row[0])
+                connection.info["recoveryops_tenant_schema"] = schema or ""
+
+        target = schema or "public"
+        if not statement.lstrip().upper().startswith(("SET ", "SHOW ")):
+            cursor.execute("SET search_path TO %s, public" % target)
+        return statement, parameters
+
+    _tenant_routing_installed.add(key)
+
+
 def make_token(user):
     return jwt.encode({
         "sub": str(user.id),
@@ -59,13 +101,11 @@ def current_user():
         resolved = _resolve_legacy_agency(user)
         if user.role != "SUPER_ADMIN" and not resolved:
             return None
-        # The database membership is authoritative. Do not reject an otherwise
-        # valid session merely because its agency claim is stale after an agency
-        # mapping repair or migration.
         token_device = data.get("device_id")
         if user.role == "REPO_AGENT" and token_device and user.device_id != token_device:
             return None
         g.agency_id = None if user.role == "SUPER_ADMIN" else resolved
+        _install_tenant_sql_routing()
         return user
     except Exception:
         return None
@@ -78,6 +118,7 @@ def auth_required(fn):
         if not user or not user.active or getattr(user, "is_deleted", False) or (not getattr(user, "agency_id", None) and user.role != "SUPER_ADMIN"):
             return jsonify({"error": "Authentication required"}), 401
         g.agency_id = None if user.role == "SUPER_ADMIN" else user.agency_id
+        _install_tenant_sql_routing()
         return fn(user, *args, **kwargs)
     return wrapper
 
@@ -89,6 +130,7 @@ def roles(*allowed):
             if user.role != "SUPER_ADMIN" and user.role not in allowed:
                 return jsonify({"error": "Forbidden"}), 403
             g.agency_id = None if user.role == "SUPER_ADMIN" else user.agency_id
+            _install_tenant_sql_routing()
             return fn(user, *args, **kwargs)
         return wrapper
     return deco
