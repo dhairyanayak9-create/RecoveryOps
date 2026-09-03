@@ -40,8 +40,22 @@ def _resolve_legacy_agency(user):
         return user.agency_id
 
 
+def _tenant_schema_for(legacy_agency_id):
+    if legacy_agency_id is None:
+        return None
+    try:
+        schema = db.session.execute(
+            text("SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id=:id LIMIT 1"),
+            {"id": int(legacy_agency_id)},
+        ).scalar()
+        return str(schema) if schema and str(schema).startswith("recovery_agency_") else None
+    except Exception:
+        db.session.rollback()
+        return None
+
+
 def _install_tenant_sql_routing():
-    """Route every PostgreSQL statement to the current authenticated agency schema."""
+    """Route every PostgreSQL statement to the authenticated agency schema."""
     engine = db.engine
     key = id(engine)
     if key in _tenant_routing_installed:
@@ -50,23 +64,10 @@ def _install_tenant_sql_routing():
     @event.listens_for(engine, "before_cursor_execute")
     def _route_tenant_sql(connection, cursor, statement, parameters, context, executemany):
         try:
-            agency_id = getattr(g, "agency_id", None)
+            schema = getattr(g, "tenant_schema", None)
         except RuntimeError:
-            agency_id = None
-
-        schema = None
-        if agency_id is not None:
-            cache_key = f"recoveryops_tenant_schema:{int(agency_id)}"
-            schema = connection.info.get(cache_key)
-            if schema is None:
-                row = connection.exec_driver_sql(
-                    "SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id = %s LIMIT 1",
-                    (int(agency_id),),
-                ).fetchone()
-                schema = str(row[0]) if row and str(row[0]).startswith("recovery_agency_") else ""
-                connection.info[cache_key] = schema
-
-        target = schema or "public"
+            schema = None
+        target = schema if schema and schema.startswith("recovery_agency_") else "public"
         if not statement.lstrip().upper().startswith(("SET ", "SHOW ")):
             cursor.execute("SET search_path TO %s, public" % target)
         return statement, parameters
@@ -100,6 +101,9 @@ def current_user():
         if user.role == "REPO_AGENT" and token_device and user.device_id != token_device:
             return None
         g.agency_id = None if user.role == "SUPER_ADMIN" else resolved
+        g.tenant_schema = None if user.role == "SUPER_ADMIN" else _tenant_schema_for(resolved)
+        if user.role != "SUPER_ADMIN" and not g.tenant_schema:
+            return None
         _install_tenant_sql_routing()
         return user
     except Exception:
@@ -113,6 +117,9 @@ def auth_required(fn):
         if not user or not user.active or getattr(user, "is_deleted", False) or (not getattr(user, "agency_id", None) and user.role != "SUPER_ADMIN"):
             return jsonify({"error": "Authentication required"}), 401
         g.agency_id = None if user.role == "SUPER_ADMIN" else user.agency_id
+        g.tenant_schema = None if user.role == "SUPER_ADMIN" else _tenant_schema_for(user.agency_id)
+        if user.role != "SUPER_ADMIN" and not g.tenant_schema:
+            return jsonify({"error": "Agency data store is not provisioned"}), 503
         _install_tenant_sql_routing()
         return fn(user, *args, **kwargs)
     return wrapper
@@ -125,6 +132,9 @@ def roles(*allowed):
             if user.role != "SUPER_ADMIN" and user.role not in allowed:
                 return jsonify({"error": "Forbidden"}), 403
             g.agency_id = None if user.role == "SUPER_ADMIN" else user.agency_id
+            g.tenant_schema = None if user.role == "SUPER_ADMIN" else _tenant_schema_for(user.agency_id)
+            if user.role != "SUPER_ADMIN" and not g.tenant_schema:
+                return jsonify({"error": "Agency data store is not provisioned"}), 503
             _install_tenant_sql_routing()
             return fn(user, *args, **kwargs)
         return wrapper
