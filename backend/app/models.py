@@ -19,6 +19,7 @@ def now(): return datetime.now(timezone.utc)
 
 class User(db.Model):
     __tablename__='user'
+    __table_args__ = {'schema': 'public'}
     id=db.Column(db.Integer,primary_key=True); agency_id=db.Column(db.Integer,db.ForeignKey('agency_company.id'),index=True,nullable=True)
     username=db.Column(db.String(80),unique=True,nullable=False,index=True)
     supabase_user_id=db.Column(UUIDString(),unique=True,index=True)
@@ -30,6 +31,7 @@ class User(db.Model):
 
 class UserOTP(db.Model):
     __tablename__='user_otp'
+    __table_args__ = {'schema': 'public'}
     id=db.Column(db.Integer,primary_key=True); agency_id=db.Column(db.Integer,db.ForeignKey('agency_company.id'),index=True,nullable=True)
     email=db.Column(db.String(160)); phone=db.Column(db.String(30)); otp_hash=db.Column(db.String(255),nullable=False)
     expires_at=db.Column(db.DateTime,nullable=False); used=db.Column(db.Boolean,default=False,nullable=False); created_at=db.Column(db.DateTime,default=now)
@@ -53,7 +55,6 @@ class DataAssignment(db.Model):
     user_id=db.Column(db.Integer,db.ForeignKey('user.id'),nullable=False,index=True); bank_id=db.Column(db.Integer,db.ForeignKey('bank.id')); vehicle_id=db.Column(db.Integer,db.ForeignKey('vehicle.id'))
     permission=db.Column(db.String(30),default='READ'); active=db.Column(db.Boolean,default=True); created_at=db.Column(db.DateTime,default=now)
 class StatusHistory(db.Model):
-    # Compatibility history table. The existing Supabase public.status_history is UUID/recovery-case based and is preserved untouched.
     __tablename__='status_history_legacy'
     id=db.Column(db.Integer,primary_key=True); agency_id=db.Column(db.Integer,db.ForeignKey('agency_company.id'),index=True,nullable=True)
     vehicle_id=db.Column(db.Integer,db.ForeignKey('vehicle.id'),nullable=False,index=True); user_id=db.Column(db.Integer,db.ForeignKey('user.id'),nullable=False)
@@ -74,7 +75,9 @@ class AppFile(db.Model):
     id=db.Column(db.Integer,primary_key=True); agency_id=db.Column(db.Integer,db.ForeignKey('agency_company.id'),index=True,nullable=True)
     filename=db.Column(db.String(255),nullable=False); vehicle_type=db.Column(db.String(40),index=True); bank_id=db.Column(db.Integer,db.ForeignKey('bank.id'),index=True); record_count=db.Column(db.Integer,default=0); status=db.Column(db.String(40),default='IMPORTED'); uploaded_by=db.Column(db.Integer,db.ForeignKey('user.id')); created_at=db.Column(db.DateTime,default=now)
 class AgencyCompany(db.Model):
-    id=db.Column(db.Integer,primary_key=True); name=db.Column(db.String(200),nullable=False,unique=True); code=db.Column(db.String(80),unique=True); phone=db.Column(db.String(40)); email=db.Column(db.String(160)); active=db.Column(db.Boolean,default=True); supabase_agency_id=db.Column(UUIDString(),unique=True,index=True); created_at=db.Column(db.DateTime,default=now)
+    __tablename__='agency_company'
+    __table_args__ = {'schema': 'public'}
+    id=db.Column(db.Integer,primary_key=True); name=db.Column(db.String(200),nullable=False,unique=True); code=db.Column(db.String(80),unique=True); phone=db.Column(db.String(40)); email=db.Column(db.String(160)); active=db.Column(db.Boolean,default=True); supabase_agency_id= db.Column(UUIDString(),unique=True,index=True); created_at=db.Column(db.DateTime,default=now)
 class Challan(db.Model):
     id=db.Column(db.Integer,primary_key=True); agency_id=db.Column(db.Integer,db.ForeignKey('agency_company.id'),index=True,nullable=True)
     vehicle_id=db.Column(db.Integer,db.ForeignKey('vehicle.id'),index=True); challan_no=db.Column(db.String(120),index=True); amount=db.Column(db.Numeric(12,2),default=0); status=db.Column(db.String(30),default='PENDING',index=True); due_date=db.Column(db.DateTime); payment_ref=db.Column(db.String(160)); created_at=db.Column(db.DateTime,default=now)
