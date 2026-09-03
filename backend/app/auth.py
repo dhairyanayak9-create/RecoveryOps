@@ -59,9 +59,9 @@ def current_user():
         resolved = _resolve_legacy_agency(user)
         if user.role != "SUPER_ADMIN" and not resolved:
             return None
-        token_agency = data.get("agency_id")
-        if user.role != "SUPER_ADMIN" and token_agency is not None and int(token_agency) != int(resolved):
-            return None
+        # The database membership is authoritative. Do not reject an otherwise
+        # valid session merely because its agency claim is stale after an agency
+        # mapping repair or migration.
         token_device = data.get("device_id")
         if user.role == "REPO_AGENT" and token_device and user.device_id != token_device:
             return None
