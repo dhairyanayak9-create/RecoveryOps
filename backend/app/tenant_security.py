@@ -1,4 +1,5 @@
-from flask import jsonify
+from flask import jsonify, g
+from sqlalchemy import text
 from . import db
 from .models import User, Bank, Vehicle, AppFile, StatusHistory, SyncMutation, RecoveryCase, Challan, Client
 from .auth import current_user
@@ -78,12 +79,34 @@ def install(app):
     def bank_list():
         u = _user()
         if not u: return _unauthorized()
-        rows = _bank_query(u).order_by(Bank.name).all()
+
+        # Bank is a tenant-owned table. Resolve the schema explicitly instead of
+        # relying only on the connection search_path, which can be stale across
+        # pooled connections during nested authentication queries.
+        schema = getattr(g, 'tenant_schema', None)
+        if u.role != 'SUPER_ADMIN':
+            if not schema or not str(schema).startswith('recovery_agency_'):
+                return jsonify({'error': 'Agency data store is not provisioned'}), 503
+            rows = db.session.execute(text(f'''SELECT id, name, code, phone, email, active, created_at
+                                               FROM "{schema}"."bank"
+                                               WHERE agency_id = :agency_id
+                                               ORDER BY name'''),
+                                      {'agency_id': u.agency_id}).mappings().all()
+        else:
+            if schema and str(schema).startswith('recovery_agency_'):
+                rows = db.session.execute(text(f'''SELECT id, name, code, phone, email, active, created_at
+                                                   FROM "{schema}"."bank"
+                                                   ORDER BY name''')).mappings().all()
+            else:
+                rows = db.session.execute(text('''SELECT id, name, code, phone, email, active, created_at
+                                                   FROM public."bank"
+                                                   ORDER BY name''')).mappings().all()
+
         return jsonify([{
-            'id': b.id, 'name': b.name, 'code': b.code,
-            'phone': b.phone, 'email': b.email,
-            'active': bool(b.active),
-            'created_at': b.created_at.isoformat() if b.created_at else None,
+            'id': b['id'], 'name': b['name'], 'code': b['code'],
+            'phone': b['phone'], 'email': b['email'],
+            'active': bool(b['active']),
+            'created_at': b['created_at'].isoformat() if b['created_at'] else None,
         } for b in rows])
 
     def bank_create():
@@ -171,8 +194,6 @@ def install(app):
         vehicles = qv.all()
         ids = [v.id for v in vehicles]
         if ids:
-            # The production public.data_assignment table has a different UUID schema,
-            # so do not touch the incompatible legacy ORM mapping here.
             for model in (StatusHistory, SyncMutation, RecoveryCase, Challan):
                 q = model.query.filter(model.vehicle_id.in_(ids))
                 if u.role != 'SUPER_ADMIN': q = q.filter(model.agency_id == u.agency_id)
