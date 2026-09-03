@@ -118,16 +118,18 @@ def create_app():
     from .routes import api, web
     from .super_admin import super_admin
     from . import super_admin_extra
+    from . import super_admin_control_v4
     app.register_blueprint(api, url_prefix="/api")
     app.register_blueprint(web)
     app.register_blueprint(super_admin)
 
-    # Apply explicit tenant-safe endpoint wrappers after every blueprint is registered.
     from .tenant_security import install as install_tenant_security
     install_tenant_security(app)
+    super_admin_control_v4.install(app)
 
     with app.app_context():
-        db.create_all()
+        if database_url.startswith("sqlite"):
+            db.create_all()
         ensure_schema()
         seed()
 
@@ -269,9 +271,4 @@ def seed():
                 super_admin.email = super_email
             super_admin.password_hash = generate_password_hash(super_password, method="scrypt:32768:8:1")
 
-    if not Bank.query.first():
-        db.session.add_all([
-            Bank(agency_id=agency.id, name="Demo Bank", code="DEMO", active=True),
-            Bank(agency_id=agency.id, name="Sample Finance", code="SAMPLE", active=True),
-        ])
     db.session.commit()
