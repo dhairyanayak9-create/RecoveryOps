@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from .models import User, AgencyCompany
 from . import db
 from sqlalchemy import text, event
+import re
 
 
 _tenant_routing_installed = set()
@@ -54,8 +55,22 @@ def _tenant_schema_for(legacy_agency_id):
         return None
 
 
+def _tenant_schema_for_modern(modern_agency_id):
+    if modern_agency_id is None:
+        return None
+    try:
+        schema = db.session.execute(
+            text("SELECT schema_name FROM public.agency_tenants WHERE agency_id=:id LIMIT 1"),
+            {"id": int(modern_agency_id)},
+        ).scalar()
+        return str(schema) if schema and str(schema).startswith("recovery_agency_") else None
+    except Exception:
+        db.session.rollback()
+        return None
+
+
 def _install_tenant_sql_routing():
-    """Route every PostgreSQL statement to the authenticated agency schema."""
+    """Route every PostgreSQL statement to the authenticated/selected agency schema."""
     engine = db.engine
     key = id(engine)
     if key in _tenant_routing_installed:
@@ -100,10 +115,18 @@ def current_user():
         token_device = data.get("device_id")
         if user.role == "REPO_AGENT" and token_device and user.device_id != token_device:
             return None
+
         g.agency_id = None if user.role == "SUPER_ADMIN" else resolved
-        g.tenant_schema = None if user.role == "SUPER_ADMIN" else _tenant_schema_for(resolved)
-        if user.role != "SUPER_ADMIN" and not g.tenant_schema:
-            return None
+        if user.role == "SUPER_ADMIN":
+            # Super Admin remains unrestricted by row-level ORM guards, but
+            # agency-specific screens transparently route tenant models to the
+            # selected agency schema. Dashboard-wide requests stay on public.
+            match = re.search(r"/api/super-admin/agencies/(\d+)(?:/|$)", request.path)
+            g.tenant_schema = _tenant_schema_for_modern(int(match.group(1))) if match else None
+        else:
+            g.tenant_schema = _tenant_schema_for(resolved)
+            if not g.tenant_schema:
+                return None
         _install_tenant_sql_routing()
         return user
     except Exception:
@@ -116,10 +139,14 @@ def auth_required(fn):
         user = current_user()
         if not user or not user.active or getattr(user, "is_deleted", False) or (not getattr(user, "agency_id", None) and user.role != "SUPER_ADMIN"):
             return jsonify({"error": "Authentication required"}), 401
-        g.agency_id = None if user.role == "SUPER_ADMIN" else user.agency_id
-        g.tenant_schema = None if user.role == "SUPER_ADMIN" else _tenant_schema_for(user.agency_id)
-        if user.role != "SUPER_ADMIN" and not g.tenant_schema:
-            return jsonify({"error": "Agency data store is not provisioned"}), 503
+        if user.role == "SUPER_ADMIN":
+            match = re.search(r"/api/super-admin/agencies/(\d+)(?:/|$)", request.path)
+            g.tenant_schema = _tenant_schema_for_modern(int(match.group(1))) if match else None
+        else:
+            g.agency_id = user.agency_id
+            g.tenant_schema = _tenant_schema_for(user.agency_id)
+            if not g.tenant_schema:
+                return jsonify({"error": "Agency data store is not provisioned"}), 503
         _install_tenant_sql_routing()
         return fn(user, *args, **kwargs)
     return wrapper
@@ -131,10 +158,14 @@ def roles(*allowed):
         def wrapper(user, *args, **kwargs):
             if user.role != "SUPER_ADMIN" and user.role not in allowed:
                 return jsonify({"error": "Forbidden"}), 403
-            g.agency_id = None if user.role == "SUPER_ADMIN" else user.agency_id
-            g.tenant_schema = None if user.role == "SUPER_ADMIN" else _tenant_schema_for(user.agency_id)
-            if user.role != "SUPER_ADMIN" and not g.tenant_schema:
-                return jsonify({"error": "Agency data store is not provisioned"}), 503
+            if user.role == "SUPER_ADMIN":
+                match = re.search(r"/api/super-admin/agencies/(\d+)(?:/|$)", request.path)
+                g.tenant_schema = _tenant_schema_for_modern(int(match.group(1))) if match else None
+            else:
+                g.agency_id = user.agency_id
+                g.tenant_schema = _tenant_schema_for(user.agency_id)
+                if not g.tenant_schema:
+                    return jsonify({"error": "Agency data store is not provisioned"}), 503
             _install_tenant_sql_routing()
             return fn(user, *args, **kwargs)
         return wrapper
