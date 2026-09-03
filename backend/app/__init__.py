@@ -6,6 +6,7 @@ from sqlalchemy import event, inspect, text
 from sqlalchemy.orm import with_loader_criteria
 
 db=SQLAlchemy()
+_agency_provision_hook_installed=False
 
 def _agency_id():
     try:return getattr(g,'agency_id',None)
@@ -47,6 +48,7 @@ def create_app():
     def too_large(error):return {'error':'File size exceeds the 50 MB upload limit.','max_bytes':50*1024*1024},413
     CORS(app,origins=os.getenv('CORS_ORIGINS','*').split(','))
     from .models import User,Bank,Vehicle,DataAssignment,StatusHistory,Notification,SyncMutation,Client,RecoveryCase,AppFile,AgencyCompany,Challan,ChatConversation,ChatMessage,Report,UserOTP
+    _install_agency_provision_hook(AgencyCompany)
     from .routes import api,web
     from .super_admin import super_admin
     from . import super_admin_extra,super_admin_control_v4,super_admin_routes_v5,super_admin_route_compat
@@ -70,44 +72,33 @@ def ensure_schema():
         db.session.commit()
     except Exception:db.session.rollback()
 
-def _provision_tenant_schema(modern_agency_id, legacy_agency_id):
-    """Create one isolated business schema and copy the legacy table shapes into it.
-    User/auth/control tables remain in public. Tenant tables are intentionally
-    copied without legacy foreign keys so they cannot point back into another
-    agency's business tables. Application-level routing supplies the tenant
-    schema for ORM and SQL operations.
-    """
+def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
+    """Create one isolated business schema and copy the legacy table shapes into it."""
     if db.engine.dialect.name != 'postgresql':
         return None
     schema = f'recovery_agency_{int(modern_agency_id)}'
-    tables = (
-        'bank','client','vehicle','recovery_case','app_file','data_assignment',
-        'status_history_legacy','notification','sync_mutation','challan',
-        'chat_conversation','chat_message','report'
-    )
-    conn = db.session.connection()
+    tables = ('bank','client','vehicle','recovery_case','app_file','data_assignment','status_history_legacy','notification','sync_mutation','challan','chat_conversation','chat_message','report')
+    conn = conn or db.session.connection()
     conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
     for table in tables:
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (LIKE public."{table}" INCLUDING ALL)'))
-        # LIKE INCLUDING ALL copies FK constraints; remove those legacy FKs so
-        # tenant tables never reference public tenant-business tables.
-        fks = conn.execute(text('''
-            SELECT conname
-            FROM pg_constraint c
-            JOIN pg_class r ON r.oid=c.conrelid
-            JOIN pg_namespace n ON n.oid=r.relnamespace
-            WHERE c.contype='f' AND n.nspname=:schema AND r.relname=:table
-        '''), {'schema':schema,'table':table}).scalars().all()
+        fks = conn.execute(text('''SELECT conname FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace WHERE c.contype='f' AND n.nspname=:schema AND r.relname=:table'''), {'schema':schema,'table':table}).scalars().all()
         for conname in fks:
             safe=str(conname).replace('"','""')
             conn.execute(text(f'ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT "{safe}"'))
-    conn.execute(text('''
-        INSERT INTO public.agency_tenants(agency_id, legacy_agency_id, schema_name, provisioned_at, schema_version)
-        VALUES(:modern,:legacy,:schema,now(),1)
-        ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,
-          schema_name=EXCLUDED.schema_name, schema_version=1
-    '''), {'modern':int(modern_agency_id),'legacy':int(legacy_agency_id),'schema':schema})
+    conn.execute(text('''INSERT INTO public.agency_tenants(agency_id, legacy_agency_id, schema_name, provisioned_at, schema_version) VALUES(:modern,:legacy,:schema,now(),1) ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''), {'modern':int(modern_agency_id),'legacy':int(legacy_agency_id),'schema':schema})
     return schema
+
+def _install_agency_provision_hook(AgencyCompany):
+    global _agency_provision_hook_installed
+    if _agency_provision_hook_installed or db.engine.dialect.name != 'postgresql':
+        return
+    @event.listens_for(AgencyCompany, 'after_insert')
+    def _after_agency_company_insert(mapper, connection, target):
+        row=connection.execute(text('SELECT id FROM public.agencies WHERE name=:n OR slug=:s LIMIT 1'), {'n':target.name,'s':target.code}).scalar()
+        if row is not None:
+            _provision_tenant_schema(int(row), int(target.id), conn=connection)
+    _agency_provision_hook_installed=True
 
 def seed():
     # Production must remain control-plane-only until SUPER_ADMIN provisions an agency.
