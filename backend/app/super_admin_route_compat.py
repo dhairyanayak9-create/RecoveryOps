@@ -31,3 +31,8 @@ def install(app):
         def unified_super_admin_page():
             return redirect('/')
         app.view_functions['super_admin.super_admin_page'] = unified_super_admin_page
+
+    # Runtime storage/file maintenance. This is installed here because this
+    # compatibility module is already loaded for every production app start.
+    from .storage_fix import install as install_storage_fix
+    install_storage_fix(app)
