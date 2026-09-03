@@ -3,10 +3,12 @@ import os
 import re
 from datetime import datetime, timezone
 
-from flask import g
+from flask import g, current_app
 from sqlalchemy import text
 
 from . import db
+from .models import AppFile, Vehicle, DataAssignment, StatusHistory, SyncMutation, RecoveryCase, Challan, Notification, User
+from .routes import get_registration_suffix
 
 
 def _resolve_schema(agency_id):
@@ -133,11 +135,10 @@ def _process_import_job_streaming(
                 f'SET search_path TO "{schema}", public'
             )
 
-            af = db.session.get(__import__(".models", fromlist=["AppFile"]).AppFile, file_id)
+            af = db.session.get(AppFile, file_id)
             if not af:
                 return
 
-            first_mapping = None
             try:
                 first_mapping, _ = next(_iter_rows(temp_path, filename))
             except StopIteration:
@@ -147,9 +148,6 @@ def _process_import_job_streaming(
                 raise ValueError(
                     "File must contain Registration Number, Chassis Number, Account Number, or Loan Number column."
                 )
-
-            from .models import AppFile, Vehicle, DataAssignment, StatusHistory, SyncMutation, RecoveryCase, Challan, Notification, User
-            from .routes import get_registration_suffix
 
             old_files = AppFile.query.filter(
                 AppFile.bank_id == bank_id,
@@ -284,10 +282,8 @@ def _process_import_job_streaming(
 
         except Exception:
             db.session.rollback()
-            current_app = __import__("flask", fromlist=["current_app"]).current_app
             current_app.logger.exception("File import failed for bank %s", bank_id)
             try:
-                from .models import AppFile
                 af = db.session.get(AppFile, file_id)
                 if af:
                     af.status = "FAILED"
