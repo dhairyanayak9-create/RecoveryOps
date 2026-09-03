@@ -1,5 +1,6 @@
 from functools import wraps
 import inspect
+from flask import redirect
 
 def install(app):
     # Older Super Admin handlers use `aid`; Flask routes use `agency_id`.
@@ -21,3 +22,12 @@ def install(app):
             return _fn(*args,**kwargs)
         wrapped._sa_compat=True
         app.view_functions[endpoint]=wrapped
+
+    # The old standalone /super-admin page uses the legacy /upload endpoint,
+    # which writes to the old public store. The main app contains the unified
+    # Super Admin Control Center and its tenant-safe upload-v2 flow. Always use
+    # that single UI so agency uploads go to the selected isolated store.
+    if 'super_admin.super_admin_page' in app.view_functions:
+        def unified_super_admin_page():
+            return redirect('/')
+        app.view_functions['super_admin.super_admin_page'] = unified_super_admin_page
