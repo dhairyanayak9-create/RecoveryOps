@@ -19,8 +19,8 @@ def _install_tenant_guards():
     # Flask request hooks set search_path during normal HTTP requests.
     # Background import workers do not run those hooks, so establish the
     # tenant schema whenever a SQLAlchemy transaction begins and g.agency_id
-    # is available. This keeps worker ORM queries on the same isolated schema
-    # as the request that created the import record.
+    # is available. Resolve both legacy and modern agency ids because older
+    # User rows use the legacy id while the control plane uses UUID/modern ids.
     @event.listens_for(Session,'after_begin')
     def _set_tenant_search_path(session, transaction, connection):
         aid = _agency_id()
@@ -28,10 +28,11 @@ def _install_tenant_guards():
             return
         try:
             schema = connection.execute(
-                text("SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id=:aid LIMIT 1"),
+                text("SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id=:aid OR agency_id=:aid LIMIT 1"),
                 {"aid": int(aid)},
             ).scalar()
             if schema and re.fullmatch(r"recovery_agency_[0-9]+", str(schema)):
+                g.tenant_schema = str(schema)
                 connection.exec_driver_sql(f'SET search_path TO "{schema}", public')
         except Exception:
             # Never make a transaction unusable solely because the optional
