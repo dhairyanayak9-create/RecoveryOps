@@ -74,30 +74,33 @@ def ensure_schema():
 
 def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
     """Create one isolated business schema and copy the legacy table shapes into it."""
-    if db.engine.dialect.name != 'postgresql':
+    if conn is None:
+        conn=db.session.connection()
+    if conn.dialect.name != 'postgresql':
         return None
-    schema = f'recovery_agency_{int(modern_agency_id)}'
-    tables = ('bank','client','vehicle','recovery_case','app_file','data_assignment','status_history_legacy','notification','sync_mutation','challan','chat_conversation','chat_message','report')
-    conn = conn or db.session.connection()
+    schema=f'recovery_agency_{int(modern_agency_id)}'
+    tables=('bank','client','vehicle','recovery_case','app_file','data_assignment','status_history_legacy','notification','sync_mutation','challan','chat_conversation','chat_message','report')
     conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
     for table in tables:
         conn.execute(text(f'CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (LIKE public."{table}" INCLUDING ALL)'))
-        fks = conn.execute(text('''SELECT conname FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace WHERE c.contype='f' AND n.nspname=:schema AND r.relname=:table'''), {'schema':schema,'table':table}).scalars().all()
+        fks=conn.execute(text('''SELECT conname FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace WHERE c.contype='f' AND n.nspname=:schema AND r.relname=:table'''),{'schema':schema,'table':table}).scalars().all()
         for conname in fks:
             safe=str(conname).replace('"','""')
             conn.execute(text(f'ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT "{safe}"'))
-    conn.execute(text('''INSERT INTO public.agency_tenants(agency_id, legacy_agency_id, schema_name, provisioned_at, schema_version) VALUES(:modern,:legacy,:schema,now(),1) ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''), {'modern':int(modern_agency_id),'legacy':int(legacy_agency_id),'schema':schema})
+    conn.execute(text('''INSERT INTO public.agency_tenants(agency_id,legacy_agency_id,schema_name,provisioned_at,schema_version) VALUES(:modern,:legacy,:schema,now(),1) ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''),{'modern':int(modern_agency_id),'legacy':int(legacy_agency_id),'schema':schema})
     return schema
 
 def _install_agency_provision_hook(AgencyCompany):
     global _agency_provision_hook_installed
-    if _agency_provision_hook_installed or db.engine.dialect.name != 'postgresql':
+    if _agency_provision_hook_installed:
         return
-    @event.listens_for(AgencyCompany, 'after_insert')
-    def _after_agency_company_insert(mapper, connection, target):
-        row=connection.execute(text('SELECT id FROM public.agencies WHERE name=:n OR slug=:s LIMIT 1'), {'n':target.name,'s':target.code}).scalar()
+    @event.listens_for(AgencyCompany,'after_insert')
+    def _after_agency_company_insert(mapper,connection,target):
+        if connection.dialect.name!='postgresql':
+            return
+        row=connection.execute(text('SELECT id FROM public.agencies WHERE name=:n OR slug=:s LIMIT 1'),{'n':target.name,'s':target.code}).scalar()
         if row is not None:
-            _provision_tenant_schema(int(row), int(target.id), conn=connection)
+            _provision_tenant_schema(int(row),int(target.id),conn=connection)
     _agency_provision_hook_installed=True
 
 def seed():
