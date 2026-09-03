@@ -118,16 +118,17 @@ def _delete_previous_bank_uploads(bank_id, current_file_id):
     old_ids = [
         row[0]
         for row in db.session.execute(
-            text("SELECT id FROM app_file WHERE bank_id = :bank_id"),
-            {"bank_id": bank_id},
+            text("SELECT id FROM app_file WHERE bank_id = :bank_id AND id <> :current_file_id"),
+            {"bank_id": bank_id, "current_file_id": current_file_id},
         ).all()
-        if row[0] != current_file_id
     ]
 
+    # A previous implementation could leave an older file if it was not in
+    # the current tenant's agency_id value. The active search_path already
+    # scopes these tables to the correct tenant schema.
     if not old_ids:
         return
 
-    # One set-based vehicle subquery replaces the previous per-file loop.
     placeholders = ", ".join(f":fid{i}" for i in range(len(old_ids)))
     params = {f"fid{i}": value for i, value in enumerate(old_ids)}
     vehicle_subquery = f"SELECT id FROM vehicle WHERE source_file_id IN ({placeholders})"
@@ -165,7 +166,7 @@ def _process_import_job_streaming(
     uploaded_by,
     agency_id,
 ):
-    """Memory-safe, single-pass streaming import worker."""
+    """Memory-safe, single-pass streaming import worker with replacement."""
     with app.app_context():
         g.agency_id = agency_id
         af = None
@@ -179,6 +180,13 @@ def _process_import_job_streaming(
             af = db.session.get(AppFile, file_id)
             if not af:
                 return
+
+            # IMPORTANT: replacement happens before duplicate snapshots are
+            # built, otherwise the previous upload makes rows look duplicated.
+            _delete_previous_bank_uploads(bank_id, af.id)
+            af = db.session.get(AppFile, file_id)
+            if not af:
+                raise RuntimeError("Current upload file disappeared during replacement.")
 
             requested_vehicle_type = _string(vehicle_type)
             mapping = None
@@ -199,7 +207,8 @@ def _process_import_job_streaming(
             existing_chassis = {
                 x[0]
                 for x in Vehicle.query.with_entities(Vehicle.chassis_no)
-                .filter(Vehicle.chassis_no.isnot(None))
+                .filter(Vehicle.chassis_no.isnot(None)
+                )
                 .all()
             }
             existing_accounts = {
