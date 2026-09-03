@@ -50,23 +50,23 @@ def _repair_tenant_sequences(schema):
         seq = f'{schema}.{table}_id_seq'
         db.session.execute(text(f'CREATE SEQUENCE IF NOT EXISTS "{schema}"."{table}_id_seq"'))
         db.session.execute(text(f'ALTER SEQUENCE "{schema}"."{table}_id_seq" OWNED BY "{schema}"."{table}".id'))
-        db.session.execute(text(f'ALTER TABLE "{schema}"."{table}" ALTER COLUMN id SET DEFAULT nextval(:seq::regclass)'), {"seq": seq})
+        db.session.execute(text(f'ALTER TABLE "{schema}"."{table}" ALTER COLUMN id SET DEFAULT nextval(CAST(:seq AS regclass))'), {"seq": seq})
         max_id = db.session.execute(text(f'SELECT max(id) FROM "{schema}"."{table}"')).scalar()
         if max_id is None:
-            db.session.execute(text(f'SELECT setval(:seq::regclass, 1, false)'), {"seq": seq})
+            db.session.execute(text(f'SELECT setval(CAST(:seq AS regclass), 1, false)'), {"seq": seq})
         else:
-            db.session.execute(text(f'SELECT setval(:seq::regclass, :v, true)'), {"seq": seq, "v": int(max_id)})
+            db.session.execute(text(f'SELECT setval(CAST(:seq AS regclass), :v, true)'), {"seq": seq, "v": int(max_id)})
 
     if db.session.execute(text("SELECT to_regclass(:n)"), {"n": f"{schema}.data_assignment"}).scalar() is not None:
         seq = f'{schema}.data_assignment_id_seq'
         db.session.execute(text(f'CREATE SEQUENCE IF NOT EXISTS "{schema}"."data_assignment_id_seq"'))
         db.session.execute(text(f'ALTER SEQUENCE "{schema}"."data_assignment_id_seq" OWNED BY "{schema}".data_assignment.id'))
-        db.session.execute(text(f'ALTER TABLE "{schema}".data_assignment ALTER COLUMN id SET DEFAULT nextval(:seq::regclass)'), {"seq": seq})
+        db.session.execute(text(f'ALTER TABLE "{schema}".data_assignment ALTER COLUMN id SET DEFAULT nextval(CAST(:seq AS regclass))'), {"seq": seq})
         max_id = db.session.execute(text(f'SELECT max(id) FROM "{schema}".data_assignment')).scalar()
         if max_id is None:
-            db.session.execute(text(f'SELECT setval(:seq::regclass, 1, false)'), {"seq": seq})
+            db.session.execute(text(f'SELECT setval(CAST(:seq AS regclass), 1, false)'), {"seq": seq})
         else:
-            db.session.execute(text(f'SELECT setval(:seq::regclass, :v, true)'), {"seq": seq, "v": int(max_id)})
+            db.session.execute(text(f'SELECT setval(CAST(:seq AS regclass), :v, true)'), {"seq": seq, "v": int(max_id)})
 
 
 def _provision_schema(modern_id, legacy_id, copy_public_rows=False):
@@ -242,17 +242,11 @@ def upload_agency_data_v2(user, agency_id):
                 except: return None
             rows.append({"agency_id":legacy_id,"account_no":account,"loan_no":val("loan_no"),"registration_no":reg,"registration_suffix":re.sub(r"\D","",reg or "")[-4:] or None,"chassis_no":(chassis or "")[:150],"engine_no":(val("engine_no") or "")[:150],"customer_name":val("customer_name"),"mobile":val("mobile"),"city":val("city"),"state":val("state"),"pincode":val("pincode"),"vehicle_type":vehicle_type,"latitude":num("latitude"),"longitude":num("longitude"),"bank_id":bank["id"]})
         # Use explicit SQL against the selected tenant schema so this path cannot accidentally write to public.
-        af = db.session.execute(text(f'''INSERT INTO "{schema}".app_file(agency_id,filename,vehicle_type,bank_id,record_count,status,uploaded_by) VALUES(:aid,:fn,:vt,:bid,0,'IMPORTING',:uid) RETURNING id'''), {"aid":legacy_id,"fn":filename,"vt":vehicle_type,"bid":bank["id"],"uid":user.id}).scalar()
-        if rows:
-            for i in range(0,len(rows),5000):
-                batch=rows[i:i+5000]
-                params=[]
-                for x in batch:
-                    x["source_file_id"]=af
-                    params.append(x)
-                db.session.execute(text(f'''INSERT INTO "{schema}".vehicle(agency_id,account_no,loan_no,registration_no,registration_suffix,chassis_no,engine_no,customer_name,mobile,city,state,pincode,vehicle_type,bank_id,source_file_id,latitude,longitude,status,version,updated_at,created_at) VALUES(:agency_id,:account_no,:loan_no,:registration_no,:registration_suffix,:chassis_no,:engine_no,:customer_name,:mobile,:city,:state,:pincode,:vehicle_type,:bank_id,:source_file_id,:latitude,:longitude,'PENDING',1,now(),now())'''), batch)
-        db.session.execute(text(f'''UPDATE "{schema}".app_file SET record_count=:n,status='IMPORTED' WHERE id=:id'''), {"n":len(rows),"id":af})
+        af = db.session.execute(text(f'''INSERT INTO "{schema}".app_file(agency_id,filename,vehicle_type,bank_id,record_count,status,uploaded_by) VALUES(:agency_id,:filename,:vehicle_type,:bank_id,:record_count,'UPLOADED',:uploaded_by) RETURNING id'''), {"agency_id":legacy_id,"filename":filename,"vehicle_type":vehicle_type,"bank_id":bank["id"],"record_count":len(rows),"uploaded_by":user.id}).scalar()
+        for row in rows:
+            db.session.execute(text(f'''INSERT INTO "{schema}".vehicle(agency_id,account_no,loan_no,registration_no,registration_suffix,chassis_no,engine_no,customer_name,mobile,city,state,pincode,vehicle_type,latitude,longitude,bank_id) VALUES(:agency_id,:account_no,:loan_no,:registration_no,:registration_suffix,:chassis_no,:engine_no,:customer_name,:mobile,:city,:state,:pincode,:vehicle_type,:latitude,:longitude,:bank_id)'''), row)
+        db.session.execute(text(f'''UPDATE "{schema}".app_file SET status='IMPORTED' WHERE id=:id'''), {"id":af})
         db.session.commit()
-        return jsonify({"message":"Data uploaded successfully","rows_created":len(rows),"rows_skipped":skipped,"agency_id":agency_id,"bank_id":bank["id"],"bank_name":bank["name"],"vehicle_type":vehicle_type,"file_id":af}),201
+        return jsonify({"message":"File imported successfully","file_id":af,"imported":len(rows),"skipped":skipped,"bank":dict(bank),"schema":schema}),201
     except Exception as e:
         db.session.rollback(); return jsonify({"error":str(e)}),400
