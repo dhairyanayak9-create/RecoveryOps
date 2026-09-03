@@ -41,12 +41,7 @@ def _resolve_legacy_agency(user):
 
 
 def _install_tenant_sql_routing():
-    """Route every PostgreSQL statement to the authenticated agency schema.
-
-    The schema name is read only from the server-side agency_tenants mapping;
-    client supplied schema names are never accepted. public remains second so
-    the control plane (user/agencies/auth mappings) stays available.
-    """
+    """Route every PostgreSQL statement to the current authenticated agency schema."""
     engine = db.engine
     key = id(engine)
     if key in _tenant_routing_installed:
@@ -61,15 +56,15 @@ def _install_tenant_sql_routing():
 
         schema = None
         if agency_id is not None:
-            schema = connection.info.get("recoveryops_tenant_schema")
+            cache_key = f"recoveryops_tenant_schema:{int(agency_id)}"
+            schema = connection.info.get(cache_key)
             if schema is None:
                 row = connection.exec_driver_sql(
                     "SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id = %s LIMIT 1",
                     (int(agency_id),),
                 ).fetchone()
-                if row and str(row[0]).startswith("recovery_agency_"):
-                    schema = str(row[0])
-                connection.info["recoveryops_tenant_schema"] = schema or ""
+                schema = str(row[0]) if row and str(row[0]).startswith("recovery_agency_") else ""
+                connection.info[cache_key] = schema
 
         target = schema or "public"
         if not statement.lstrip().upper().startswith(("SET ", "SHOW ")):
