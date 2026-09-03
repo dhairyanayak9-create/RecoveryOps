@@ -79,6 +79,8 @@ def create_app():
     app.register_blueprint(api,url_prefix='/api');app.register_blueprint(web);app.register_blueprint(super_admin)
     from .tenant_security import install as install_tenant_security
     install_tenant_security(app);super_admin_control_v4.install(app);super_admin_routes_v5.install(app);super_admin_route_compat.install(app)
+    from .import_fix import install as install_import_fix
+    install_import_fix(app)
     with app.app_context():
         if database_url.startswith('sqlite'):db.create_all()
         ensure_schema();seed()
