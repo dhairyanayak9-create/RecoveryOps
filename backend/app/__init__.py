@@ -122,6 +122,10 @@ def create_app():
     app.register_blueprint(web)
     app.register_blueprint(super_admin)
 
+    # Apply explicit tenant-safe endpoint wrappers after every blueprint is registered.
+    from .tenant_security import install as install_tenant_security
+    install_tenant_security(app)
+
     with app.app_context():
         db.create_all()
         ensure_schema()
