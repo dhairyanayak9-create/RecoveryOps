@@ -1,6 +1,6 @@
 from flask import jsonify
 from . import db
-from .models import User, Bank, Vehicle, AppFile, DataAssignment, StatusHistory, SyncMutation, RecoveryCase, Challan, Client
+from .models import User, Bank, Vehicle, AppFile, StatusHistory, SyncMutation, RecoveryCase, Challan, Client
 from .auth import current_user
 
 
@@ -73,7 +73,6 @@ def _replace_view(app, endpoint, fn):
 def install(app):
     from . import routes
 
-    # This function is used by all vehicle search/status/sync routes at runtime.
     routes.accessible_vehicle_query = _vehicle_query
 
     def bank_list():
@@ -140,13 +139,17 @@ def install(app):
         u = _user()
         if not u: return _unauthorized()
         rows = _file_query(u).order_by(AppFile.id.desc()).all()
-        return jsonify([{
-            'id': f.id, 'filename': f.filename, 'vehicle_type': f.vehicle_type,
-            'bank_id': f.bank_id, 'record_count': f.record_count or 0,
-            'status': f.status, 'uploaded_by': f.uploaded_by,
-            'agency_id': f.agency_id,
-            'created_at': f.created_at.isoformat() if f.created_at else None,
-        } for f in rows])
+        out=[]
+        for f in rows:
+            b=Bank.query.filter(Bank.id == f.bank_id, Bank.agency_id == f.agency_id).first() if f.bank_id else None
+            out.append({
+                'id': f.id, 'filename': f.filename, 'vehicle_type': f.vehicle_type,
+                'bank_id': f.bank_id, 'bank_name': b.name if b else '—',
+                'record_count': f.record_count or 0, 'status': f.status,
+                'uploaded_by': f.uploaded_by, 'agency_id': f.agency_id,
+                'created_at': f.created_at.isoformat() if f.created_at else None,
+            })
+        return jsonify(out)
 
     def file_status(file_id):
         u = _user()
@@ -168,7 +171,9 @@ def install(app):
         vehicles = qv.all()
         ids = [v.id for v in vehicles]
         if ids:
-            for model in (DataAssignment, StatusHistory, SyncMutation, RecoveryCase, Challan):
+            # The production public.data_assignment table has a different UUID schema,
+            # so do not touch the incompatible legacy ORM mapping here.
+            for model in (StatusHistory, SyncMutation, RecoveryCase, Challan):
                 q = model.query.filter(model.vehicle_id.in_(ids))
                 if u.role != 'SUPER_ADMIN': q = q.filter(model.agency_id == u.agency_id)
                 q.delete(synchronize_session=False)
@@ -190,8 +195,6 @@ def install(app):
         q = RecoveryCase.query if u.role == 'SUPER_ADMIN' else RecoveryCase.query.filter(RecoveryCase.agency_id == u.agency_id)
         return jsonify([routes.obj_json(x, ['id','vehicle_id','client_id','assigned_user_id','stage','notes','next_action_at','created_at','updated_at']) for x in q.order_by(RecoveryCase.id.desc()).limit(500).all()])
 
-    # Explicit endpoint replacement prevents cross-agency leakage even if an old
-    # tenant guard is bypassed by a direct query/get_or_404.
     _replace_view(app, 'api.banks', bank_list)
     _replace_view(app, 'api.add_bank', bank_create)
     _replace_view(app, 'api.update_bank', bank_update)
