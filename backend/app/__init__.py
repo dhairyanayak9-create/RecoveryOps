@@ -6,6 +6,7 @@ from sqlalchemy import event, inspect, text
 from sqlalchemy.orm import with_loader_criteria
 
 db=SQLAlchemy()
+_agency_provision_hook_installed=False
 
 def _agency_id():
     try:return getattr(g,'agency_id',None)
@@ -47,6 +48,7 @@ def create_app():
     def too_large(error):return {'error':'File size exceeds the 50 MB upload limit.','max_bytes':50*1024*1024},413
     CORS(app,origins=os.getenv('CORS_ORIGINS','*').split(','))
     from .models import User,Bank,Vehicle,DataAssignment,StatusHistory,Notification,SyncMutation,Client,RecoveryCase,AppFile,AgencyCompany,Challan,ChatConversation,ChatMessage,Report,UserOTP
+    _install_agency_provision_hook(AgencyCompany)
     from .routes import api,web
     from .super_admin import super_admin
     from . import super_admin_extra,super_admin_control_v4,super_admin_routes_v5,super_admin_route_compat
@@ -60,7 +62,6 @@ def create_app():
 
 def ensure_schema():
     if db.engine.dialect.name!='postgresql':return
-    from .models import User,AgencyCompany
     try:
         agencies=db.session.execute(text('SELECT id,name,slug,phone,email,is_active FROM public.agencies ORDER BY id')).mappings().all()
         for a in agencies:
@@ -71,17 +72,51 @@ def ensure_schema():
         db.session.commit()
     except Exception:db.session.rollback()
 
+def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
+    """Create one isolated business schema and copy the legacy table shapes into it."""
+    if conn is None:
+        conn=db.session.connection()
+    if conn.dialect.name != 'postgresql':
+        return None
+    schema=f'recovery_agency_{int(modern_agency_id)}'
+    tables=('bank','client','vehicle','recovery_case','app_file','data_assignment','status_history_legacy','notification','sync_mutation','challan','chat_conversation','chat_message','report')
+    conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+    for table in tables:
+        conn.execute(text(f'CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (LIKE public."{table}" INCLUDING ALL)'))
+        fks=conn.execute(text('''SELECT conname FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace WHERE c.contype='f' AND n.nspname=:schema AND r.relname=:table'''),{'schema':schema,'table':table}).scalars().all()
+        for conname in fks:
+            safe=str(conname).replace('"','""')
+            conn.execute(text(f'ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT "{safe}"'))
+    conn.execute(text('''INSERT INTO public.agency_tenants(agency_id,legacy_agency_id,schema_name,provisioned_at,schema_version) VALUES(:modern,:legacy,:schema,now(),1) ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''),{'modern':int(modern_agency_id),'legacy':int(legacy_agency_id),'schema':schema})
+    return schema
+
+def _install_agency_provision_hook(AgencyCompany):
+    global _agency_provision_hook_installed
+    if _agency_provision_hook_installed:
+        return
+    @event.listens_for(AgencyCompany,'after_insert')
+    def _after_agency_company_insert(mapper,connection,target):
+        if connection.dialect.name!='postgresql':
+            return
+        row=connection.execute(text('SELECT id FROM public.agencies WHERE name=:n OR slug=:s LIMIT 1'),{'n':target.name,'s':target.code}).scalar()
+        if row is not None:
+            _provision_tenant_schema(int(row),int(target.id),conn=connection)
+    _agency_provision_hook_installed=True
+
 def seed():
-    from .models import User,AgencyCompany
+    # Production must remain control-plane-only until SUPER_ADMIN provisions an agency.
+    # Never recreate the old Demo Recovery Agency or a default admin automatically.
+    from .models import User
     from werkzeug.security import generate_password_hash
-    agency=AgencyCompany.query.order_by(AgencyCompany.id.asc()).first()
-    if not agency:agency=AgencyCompany(name='Demo Recovery Agency',code='DEMO');db.session.add(agency);db.session.flush()
-    admin=User.query.filter_by(username='admin').first()
-    if not admin:db.session.add(User(agency_id=agency.id,username='admin',password_hash=generate_password_hash('admin123'),full_name='System Administrator',role='ADMIN',active=True))
-    elif admin.agency_id is None:admin.agency_id=agency.id
     su=(os.getenv('SUPER_ADMIN_USERNAME') or '').strip();se=(os.getenv('SUPER_ADMIN_EMAIL') or '').strip().lower() or None;sp=os.getenv('SUPER_ADMIN_PASSWORD') or ''
-    if su and sp:
+    if not su or not sp:
+        return
+    try:
         sa=User.query.filter(db.or_(User.username==su,User.email==se)).first()
-        if not sa:db.session.add(User(agency_id=None,username=su,email=se,password_hash=generate_password_hash(sp,method='scrypt:32768:8:1'),full_name='RecoveryOps Super Admin',role='SUPER_ADMIN',active=True,is_deleted=False))
-        else:sa.role='SUPER_ADMIN';sa.active=True;sa.is_deleted=False;sa.email=se or sa.email;sa.password_hash=generate_password_hash(sp,method='scrypt:32768:8:1')
-    db.session.commit()
+        if not sa:
+            db.session.add(User(agency_id=None,username=su,email=se,password_hash=generate_password_hash(sp,method='scrypt:32768:8:1'),full_name='RecoveryOps Super Admin',role='SUPER_ADMIN',active=True,is_deleted=False))
+        else:
+            sa.role='SUPER_ADMIN';sa.active=True;sa.is_deleted=False;sa.email=se or sa.email;sa.password_hash=generate_password_hash(sp,method='scrypt:32768:8:1');sa.agency_id=None
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
