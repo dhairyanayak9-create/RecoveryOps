@@ -1,4 +1,5 @@
 import csv
+import io
 import os
 import re
 
@@ -122,10 +123,6 @@ def _delete_previous_bank_uploads(bank_id, current_file_id):
             {"bank_id": bank_id, "current_file_id": current_file_id},
         ).all()
     ]
-
-    # A previous implementation could leave an older file if it was not in
-    # the current tenant's agency_id value. The active search_path already
-    # scopes these tables to the correct tenant schema.
     if not old_ids:
         return
 
@@ -145,15 +142,65 @@ def _delete_previous_bank_uploads(bank_id, current_file_id):
             params,
         )
 
-    db.session.execute(
-        text(f"DELETE FROM vehicle WHERE source_file_id IN ({placeholders})"),
-        params,
-    )
-    db.session.execute(
-        text(f"DELETE FROM app_file WHERE id IN ({placeholders})"),
-        params,
-    )
+    db.session.execute(text(f"DELETE FROM vehicle WHERE source_file_id IN ({placeholders})"), params)
+    db.session.execute(text(f"DELETE FROM app_file WHERE id IN ({placeholders})"), params)
     db.session.commit()
+
+
+def _load_existing_identifiers():
+    """Load all identifiers with one DB round trip instead of four queries."""
+    rows = db.session.execute(
+        text(
+            "SELECT registration_no, chassis_no, account_no, loan_no "
+            "FROM vehicle "
+            "WHERE registration_no IS NOT NULL OR chassis_no IS NOT NULL "
+            "OR account_no IS NOT NULL OR loan_no IS NOT NULL"
+        )
+    ).all()
+    regs, chassis, accounts, loans = set(), set(), set(), set()
+    for reg, ch, account, loan in rows:
+        if reg:
+            regs.add(reg)
+        if ch:
+            chassis.add(ch)
+        if account:
+            accounts.add(account)
+        if loan:
+            loans.add(loan)
+    return regs, chassis, accounts, loans
+
+
+def _copy_insert_vehicle_rows(rows):
+    """Insert prepared rows through PostgreSQL COPY for high throughput."""
+    if not rows:
+        return
+
+    csv_buffer = io.StringIO()
+    writer = csv.writer(csv_buffer, lineterminator="\n")
+    columns = (
+        "agency_id", "account_no", "loan_no", "registration_no", "registration_suffix",
+        "chassis_no", "engine_no", "customer_name", "mobile", "city", "state", "pincode",
+        "vehicle_type", "latitude", "longitude", "bank_id", "source_file_id",
+    )
+
+    for row in rows:
+        writer.writerow([row.get(column) for column in columns])
+
+    csv_buffer.seek(0)
+    connection = db.session.connection()
+    raw = connection.connection
+    cursor = raw.cursor()
+    try:
+        cursor.copy_expert(
+            "COPY vehicle (" + ", ".join(columns) + ") FROM STDIN WITH (FORMAT CSV)",
+            csv_buffer,
+        )
+        raw.commit()
+    except Exception:
+        raw.rollback()
+        raise
+    finally:
+        cursor.close()
 
 
 def _process_import_job_streaming(
@@ -166,7 +213,7 @@ def _process_import_job_streaming(
     uploaded_by,
     agency_id,
 ):
-    """Memory-safe, single-pass streaming import worker with replacement."""
+    """Memory-safe streaming importer using PostgreSQL COPY for bulk inserts."""
     with app.app_context():
         g.agency_id = agency_id
         af = None
@@ -181,8 +228,7 @@ def _process_import_job_streaming(
             if not af:
                 return
 
-            # IMPORTANT: replacement happens before duplicate snapshots are
-            # built, otherwise the previous upload makes rows look duplicated.
+            # Replacement happens before duplicate snapshots are built.
             _delete_previous_bank_uploads(bank_id, af.id)
             af = db.session.get(AppFile, file_id)
             if not af:
@@ -194,35 +240,11 @@ def _process_import_job_streaming(
             dup = 0
             invalid = 0
             batch = []
-            BATCH_SIZE = 5000
+            BATCH_SIZE = 10000
 
-            # Existing identifiers are loaded once. The new file itself is
-            # checked incrementally, so there is no second Excel scan.
-            existing_regs = {
-                x[0]
-                for x in Vehicle.query.with_entities(Vehicle.registration_no)
-                .filter(Vehicle.registration_no.isnot(None))
-                .all()
-            }
-            existing_chassis = {
-                x[0]
-                for x in Vehicle.query.with_entities(Vehicle.chassis_no)
-                .filter(Vehicle.chassis_no.isnot(None)
-                )
-                .all()
-            }
-            existing_accounts = {
-                x[0]
-                for x in Vehicle.query.with_entities(Vehicle.account_no)
-                .filter(Vehicle.account_no.isnot(None))
-                .all()
-            }
-            existing_loans = {
-                x[0]
-                for x in Vehicle.query.with_entities(Vehicle.loan_no)
-                .filter(Vehicle.loan_no.isnot(None))
-                .all()
-            }
+            # One DB round trip for all existing identifiers. New-file
+            # duplicates are tracked incrementally in the same pass.
+            existing_regs, existing_chassis, existing_accounts, existing_loans = _load_existing_identifiers()
 
             for row_mapping, row in _iter_rows(temp_path, filename):
                 if mapping is None:
@@ -284,13 +306,11 @@ def _process_import_job_streaming(
                 created += 1
 
                 if len(batch) >= BATCH_SIZE:
-                    db.session.bulk_insert_mappings(Vehicle, batch)
-                    db.session.commit()
+                    _copy_insert_vehicle_rows(batch)
                     batch = []
 
             if batch:
-                db.session.bulk_insert_mappings(Vehicle, batch)
-                db.session.commit()
+                _copy_insert_vehicle_rows(batch)
 
             af = db.session.get(AppFile, file_id)
             if af:
@@ -319,7 +339,7 @@ def _process_import_job_streaming(
                     db.session.commit()
 
             current_app.logger.info(
-                "File import completed: bank=%s file=%s created=%s duplicates=%s invalid=%s replaced_previous=true",
+                "File import completed: bank=%s file=%s created=%s duplicates=%s invalid=%s replaced_previous=true method=COPY",
                 bank_id,
                 file_id,
                 created,
@@ -346,7 +366,7 @@ def _process_import_job_streaming(
 
 
 def install(app):
-    """Install a streaming import worker; keep the HTTP endpoint asynchronous."""
+    """Install the high-throughput streaming import worker."""
     from . import routes
 
     if not getattr(routes._process_import_job, "_recoveryops_streaming", False):
