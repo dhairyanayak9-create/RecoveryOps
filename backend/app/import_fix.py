@@ -171,7 +171,7 @@ def _load_existing_identifiers():
 
 
 def _copy_insert_vehicle_rows(rows):
-    """Insert prepared rows through PostgreSQL COPY for high throughput."""
+    """Insert prepared rows through PostgreSQL COPY using psycopg2/psycopg3."""
     if not rows:
         return
 
@@ -182,25 +182,35 @@ def _copy_insert_vehicle_rows(rows):
         "chassis_no", "engine_no", "customer_name", "mobile", "city", "state", "pincode",
         "vehicle_type", "latitude", "longitude", "bank_id", "source_file_id",
     )
-
     for row in rows:
         writer.writerow([row.get(column) for column in columns])
+    csv_text = csv_buffer.getvalue()
 
-    csv_buffer.seek(0)
     connection = db.session.connection()
     raw = connection.connection
-    cursor = raw.cursor()
     try:
-        cursor.copy_expert(
-            "COPY vehicle (" + ", ".join(columns) + ") FROM STDIN WITH (FORMAT CSV)",
-            csv_buffer,
-        )
-        raw.commit()
+        if hasattr(raw, "cursor"):
+            cursor = raw.cursor()
+            try:
+                if hasattr(cursor, "copy_expert"):
+                    cursor.copy_expert(
+                        "COPY vehicle (" + ", ".join(columns) + ") FROM STDIN WITH (FORMAT CSV)",
+                        io.StringIO(csv_text),
+                    )
+                elif hasattr(cursor, "copy"):
+                    with cursor.copy(
+                        "COPY vehicle (" + ", ".join(columns) + ") FROM STDIN WITH (FORMAT CSV)"
+                    ) as copy:
+                        copy.write(csv_text)
+                else:
+                    raise RuntimeError("PostgreSQL driver does not expose COPY support")
+            finally:
+                cursor.close()
+        else:
+            raise RuntimeError("PostgreSQL connection does not expose a cursor")
     except Exception:
-        raw.rollback()
+        db.session.rollback()
         raise
-    finally:
-        cursor.close()
 
 
 def _process_import_job_streaming(
@@ -228,7 +238,6 @@ def _process_import_job_streaming(
             if not af:
                 return
 
-            # Replacement happens before duplicate snapshots are built.
             _delete_previous_bank_uploads(bank_id, af.id)
             af = db.session.get(AppFile, file_id)
             if not af:
@@ -242,8 +251,6 @@ def _process_import_job_streaming(
             batch = []
             BATCH_SIZE = 10000
 
-            # One DB round trip for all existing identifiers. New-file
-            # duplicates are tracked incrementally in the same pass.
             existing_regs, existing_chassis, existing_accounts, existing_loans = _load_existing_identifiers()
 
             for row_mapping, row in _iter_rows(temp_path, filename):
@@ -307,10 +314,12 @@ def _process_import_job_streaming(
 
                 if len(batch) >= BATCH_SIZE:
                     _copy_insert_vehicle_rows(batch)
+                    db.session.commit()
                     batch = []
 
             if batch:
                 _copy_insert_vehicle_rows(batch)
+                db.session.commit()
 
             af = db.session.get(AppFile, file_id)
             if af:
