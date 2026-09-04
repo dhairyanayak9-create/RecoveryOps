@@ -71,22 +71,44 @@ def force_file_delete(file_id, agency_id=None):
         return jsonify(error=str(exc)), 400
 
 
-def _cleanup_temp_files():
+def _cleanup_temp_files(app):
+    """Remove stale upload files from the directory actually used by the importer."""
     now = time.time()
     removed = 0
-    try:
-        for name in os.listdir("/tmp"):
-            path = os.path.join("/tmp", name)
-            try:
-                if not os.path.isfile(path) or not name.lower().endswith(UPLOAD_SUFFIXES):
-                    continue
-                if now - os.path.getmtime(path) >= TEMP_MAX_AGE:
-                    os.remove(path)
-                    removed += 1
-            except (OSError, ValueError):
-                pass
-    except OSError:
-        pass
+    directories = []
+
+    configured = os.getenv("RECOVERYOPS_IMPORT_DIR", "").strip()
+    if configured:
+        directories.append(os.path.abspath(configured))
+
+    if os.path.exists("/app/data"):
+        directories.append(os.path.join("/app/data", "import_jobs"))
+
+    if app is not None:
+        directories.append(os.path.join(app.instance_path, "import_jobs"))
+
+    # Keep cleaning legacy /tmp upload files as well.
+    directories.append("/tmp")
+
+    seen = set()
+    for directory in directories:
+        directory = os.path.abspath(directory)
+        if directory in seen or not os.path.isdir(directory):
+            continue
+        seen.add(directory)
+        try:
+            for name in os.listdir(directory):
+                path = os.path.join(directory, name)
+                try:
+                    if not os.path.isfile(path) or not name.lower().endswith(UPLOAD_SUFFIXES):
+                        continue
+                    if now - os.path.getmtime(path) >= TEMP_MAX_AGE:
+                        os.remove(path)
+                        removed += 1
+                except (OSError, ValueError):
+                    pass
+        except OSError:
+            pass
     return removed
 
 
@@ -94,7 +116,7 @@ def _cleanup_loop(app):
     while True:
         time.sleep(CLEANUP_INTERVAL)
         try:
-            removed = _cleanup_temp_files()
+            removed = _cleanup_temp_files(app)
             if removed:
                 app.logger.info("RecoveryOps removed %s stale upload temp files", removed)
         except Exception:
@@ -157,7 +179,7 @@ def _fast_dashboard():
 
 def install(app):
     # No DB DDL or index creation here. This function is deliberately startup-safe.
-    removed = _cleanup_temp_files()
+    removed = _cleanup_temp_files(app)
     if removed:
         app.logger.info("RecoveryOps removed %s stale upload temp files", removed)
 
