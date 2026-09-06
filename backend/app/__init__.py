@@ -1,6 +1,6 @@
 import os
 import re
-from flask import Flask, g
+from flask import Flask, g, render_template
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy import event, inspect, text
@@ -70,6 +70,10 @@ def create_app():
     app.register_blueprint(api,url_prefix='/api');app.register_blueprint(web)
     from .super_admin import super_admin
     app.register_blueprint(super_admin)
+    # Keep the old /super-admin entry point as a standalone form login.
+    # The existing Super Admin control center remains available at /super-admin/control.
+    app.view_functions['super_admin.super_admin_page'] = lambda: render_template('super_admin_login.html')
+    app.add_url_rule('/super-admin/control','super_admin_control_page',lambda: render_template('super_admin.html'))
     from .tenant_security import install as install_tenant_security
     install_tenant_security(app)
     from .import_fix import install as install_import_fix
