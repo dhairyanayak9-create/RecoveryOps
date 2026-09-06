@@ -2,7 +2,7 @@ def patchButtonSizes = tasks.register('patchButtonSizes') {
     doLast {
         File file = file('src/main/java/com/recoveryops/MainActivity.java')
         String source = file.getText('UTF-8')
-        if (source.contains('RECOVERYOPS_BUTTON_SIZE_V1')) return
+        if (source.contains('RECOVERYOPS_BUTTON_SIZE_V2')) return
 
         String marker = '        initViews();'
         int markerPos = source.indexOf(marker)
@@ -18,7 +18,7 @@ def patchButtonSizes = tasks.register('patchButtonSizes') {
 
         String methods = '''
 
-    // RECOVERYOPS_BUTTON_SIZE_V1
+    // RECOVERYOPS_BUTTON_SIZE_V2
     private void enlargeApplicationButtons() {
         View root = findViewById(android.R.id.content);
         enlargeButtonsRecursive(root);
@@ -27,18 +27,14 @@ def patchButtonSizes = tasks.register('patchButtonSizes') {
     private void enlargeButtonsRecursive(View view) {
         if (view instanceof Button) {
             Button b = (Button) view;
-            b.setMinHeight(dp(70));
             b.setMinimumHeight(dp(70));
-            b.setMinWidth(dp(110));
             b.setMinimumWidth(dp(110));
             b.setPadding(dp(18), dp(10), dp(18), dp(10));
             float current = b.getTextSize() / getResources().getDisplayMetrics().scaledDensity;
             if (current < 15f) b.setTextSize(15f);
         } else if (view instanceof ImageButton) {
             ImageButton b = (ImageButton) view;
-            b.setMinHeight(dp(64));
             b.setMinimumHeight(dp(64));
-            b.setMinWidth(dp(64));
             b.setMinimumWidth(dp(64));
             b.setPadding(dp(14), dp(14), dp(14), dp(14));
         }
