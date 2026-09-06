@@ -67,13 +67,11 @@ public class SyncService extends Service {
     }
 
     private void sync(String token) {
+        boolean downloadStarted = false;
         try {
             JSONObject dash = get(token, "/dashboard");
             if (dash == null) throw new IOException("Unable to reach server");
             int total = dash.optInt("accessible_total", dash.optInt("total", 0));
-            localDb.clear();
-            broadcast(0, 0, total, false);
-            updateNotification("Syncing… 0%");
 
             int afterVersion = 0;
             int afterId = 0;
@@ -81,11 +79,27 @@ public class SyncService extends Service {
             int safety = 0;
             int done = 0;
 
+            // Do not erase an existing offline database until the first page
+            // has been successfully received. A bad/empty server response
+            // must never turn a working local DB into 0 records.
             while (more && running && safety++ < 100000) {
                 JSONObject page = get(token,
                         "/sync/download?after_version=" + afterVersion +
                         "&after_id=" + afterId + "&limit=5000");
                 if (page == null) throw new IOException("Sync request failed");
+
+                if (!downloadStarted) {
+                    int serverTotal = page.optInt("total", total);
+                    JSONArray firstRows = page.optJSONArray("records");
+                    if (serverTotal > 0 && (firstRows == null || firstRows.length() == 0)) {
+                        throw new IOException("Server reported records but returned an empty sync page");
+                    }
+                    localDb.clear();
+                    downloadStarted = true;
+                    total = serverTotal;
+                    broadcast(0, 0, total, false);
+                    updateNotification("Syncing… 0%");
+                }
 
                 JSONArray rows = page.optJSONArray("records");
                 if (rows != null && rows.length() > 0) {
@@ -107,10 +121,18 @@ public class SyncService extends Service {
                 if (!more) break;
             }
 
+            if (!downloadStarted) {
+                throw new IOException("No sync data received from server");
+            }
+
             int finalCount = localDb.count();
+            if (total > 0 && finalCount == 0) {
+                throw new IOException("Sync returned records but local database is empty");
+            }
+
             prefs.edit().putLong("last_sync_at", System.currentTimeMillis()).apply();
             broadcast(100, finalCount, total, true);
-            updateNotification("Sync complete • 100%");
+            updateNotification("Sync complete • " + finalCount + " records");
         } catch (Exception e) {
             broadcast(-1, localDb.count(), 0, true);
             updateNotification("Sync failed");
