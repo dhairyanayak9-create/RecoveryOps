@@ -56,7 +56,7 @@ def _tenant_schema_for(legacy_agency_id):
 
 
 def _install_tenant_sql_routing():
-    """Route every PostgreSQL statement to the authenticated agency schema."""
+    """Route authenticated tenant SQL to its isolated agency schema."""
     engine = db.engine
     key = id(engine)
     if key in _tenant_routing_installed:
@@ -93,8 +93,16 @@ def current_user():
     try:
         data = jwt.decode(h[7:], current_app.config["JWT_SECRET_KEY"], algorithms=["HS256"])
         user = db.session.get(User, int(data["sub"]))
-        if not user or user.role == "SUPER_ADMIN":
+        if not user:
             return None
+
+        # SUPER_ADMIN is intentionally standalone: it has no tenant binding.
+        if user.role == "SUPER_ADMIN":
+            g.agency_id = None
+            g.tenant_schema = None
+            _install_tenant_sql_routing()
+            return user
+
         resolved = _resolve_legacy_agency(user)
         if not resolved:
             return None
@@ -115,7 +123,16 @@ def auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         user = current_user()
-        if not user or not user.active or getattr(user, "is_deleted", False) or not getattr(user, "agency_id", None):
+        if not user or not user.active or getattr(user, "is_deleted", False):
+            return jsonify({"error": "Authentication required"}), 401
+
+        if user.role == "SUPER_ADMIN":
+            g.agency_id = None
+            g.tenant_schema = None
+            _install_tenant_sql_routing()
+            return fn(user, *args, **kwargs)
+
+        if not getattr(user, "agency_id", None):
             return jsonify({"error": "Authentication required"}), 401
         g.agency_id = user.agency_id
         g.tenant_schema = _tenant_schema_for(user.agency_id)
@@ -130,8 +147,14 @@ def roles(*allowed):
     def deco(fn):
         @wraps(fn)
         def wrapper(user, *args, **kwargs):
-            if user.role not in allowed:
+            # Standalone Super Admin bypasses tenant role restrictions.
+            if user.role != "SUPER_ADMIN" and user.role not in allowed:
                 return jsonify({"error": "Forbidden"}), 403
+            if user.role == "SUPER_ADMIN":
+                g.agency_id = None
+                g.tenant_schema = None
+                _install_tenant_sql_routing()
+                return fn(user, *args, **kwargs)
             g.agency_id = user.agency_id
             g.tenant_schema = _tenant_schema_for(user.agency_id)
             if not g.tenant_schema:
