@@ -1,0 +1,126 @@
+def patchVehicleDetailV2 = tasks.register('patchVehicleDetailV2') {
+    doLast {
+        File file = file('src/main/java/com/recoveryops/MainActivity.java')
+        String source = file.getText('UTF-8')
+        if (source.contains('RECOVERYOPS_SCREEN_V3')) return
+
+        String marker = 'showDetails('
+        int call = source.indexOf(marker)
+        if (call < 0) throw new GradleException('showDetails method not found')
+
+        int methodStart = source.lastIndexOf('private ', call)
+        if (methodStart < 0) methodStart = source.lastIndexOf('void ', call)
+        if (methodStart < 0) throw new GradleException('showDetails method start not found')
+
+        int open = source.indexOf('{', call)
+        if (open < 0) throw new GradleException('showDetails opening brace not found')
+        int depth = 0
+        int close = -1
+        for (int i = open; i < source.length(); i++) {
+            char c = source.charAt(i)
+            if (c == '{') depth++
+            else if (c == '}') {
+                depth--
+                if (depth == 0) { close = i; break }
+            }
+        }
+        if (close < 0) throw new GradleException('showDetails closing brace not found')
+
+        String replacement = '''    // RECOVERYOPS_SCREEN_V3
+    private void showDetails(JSONObject vehicle) {
+        if (vehicle == null) return;
+        final ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(12, 12, 12, 18);
+        root.setBackgroundColor(Color.rgb(238,238,238));
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.setPadding(16, 14, 10, 14);
+        GradientDrawable topBg = new GradientDrawable();
+        topBg.setColor(Color.rgb(198,24,48)); topBg.setCornerRadius(14);
+        top.setBackground(topBg);
+        top.addView(text(safe(vehicle,"status"),20,Color.WHITE,true), new LinearLayout.LayoutParams(0,60,1f));
+        Button kit = detailV3Button("REPO KIT", Color.rgb(255,218,72), Color.rgb(35,35,35));
+        kit.setOnClickListener(v -> shareWhatsApp(vehicle));
+        top.addView(kit,new LinearLayout.LayoutParams(130,60));
+        root.addView(top);
+
+        LinearLayout customer = detailV3Section("");
+        customer.addView(text(safe(vehicle,"customer_name"),24,Color.rgb(45,45,58),true));
+        customer.addView(text(safe(vehicle,"city"),15,Color.rgb(90,90,100),false));
+        root.addView(customer);
+
+        LinearLayout vd = detailV3Section("VEHICLE DETAILS");
+        detailV3Row(vd,"Make",detailV3First(vehicle,"make","vehicle_type"));
+        detailV3Row(vd,"Chassis No",safe(vehicle,"chassis_no"));
+        detailV3Row(vd,"Engine No",safe(vehicle,"engine_no"));
+        detailV3Row(vd,"Allocation",safe(vehicle,"allocation"));
+        detailV3Row(vd,"Model",safe(vehicle,"model"));
+        detailV3Row(vd,"Upload Date",detailV3First(vehicle,"upload_date","updated_at"));
+        detailV3Row(vd,"Product Name",detailV3First(vehicle,"product_name","vehicle_type"));
+        root.addView(vd);
+
+        LinearLayout ld = detailV3Section("LOAN DETAILS");
+        detailV3Row(ld,"Bank",safe(vehicle,"bank_name"));
+        detailV3Row(ld,"Branch",safe(vehicle,"branch"));
+        detailV3Row(ld,"Agreement No",detailV3First(vehicle,"agreement_no","loan_no"));
+        detailV3Row(ld,"Emi",safe(vehicle,"emi"));
+        detailV3Row(ld,"POS",safe(vehicle,"pos"));
+        detailV3Row(ld,"BKTS",safe(vehicle,"bkts"));
+        detailV3Row(ld,"TBR",safe(vehicle,"tbr"));
+        detailV3Row(ld,"Seasoning",safe(vehicle,"seasoning"));
+        detailV3Row(ld,"Sec 17",safe(vehicle,"sec_17"));
+        root.addView(ld);
+
+        LinearLayout cb = detailV3Section("CONFIRMED BY");
+        detailV3Confirmed(cb,vehicle,"1st");
+        detailV3Confirmed(cb,vehicle,"2nd");
+        detailV3Confirmed(cb,vehicle,"3rd");
+        root.addView(cb);
+
+        LinearLayout at = detailV3Section("ATTACHMENTS");
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        Button sms = detailV3Button("SMS",Color.rgb(55,55,60),Color.WHITE);
+        Button wa = detailV3Button("WhatsApp",Color.rgb(76,175,80),Color.WHITE);
+        sms.setOnClickListener(v -> Toast.makeText(this,"SMS attachment action",Toast.LENGTH_SHORT).show());
+        wa.setOnClickListener(v -> shareWhatsApp(vehicle));
+        actions.addView(sms,new LinearLayout.LayoutParams(0,64,1f));
+        LinearLayout.LayoutParams wap = new LinearLayout.LayoutParams(0,64,1f); wap.leftMargin=10;
+        actions.addView(wa,wap); at.addView(actions); root.addView(at);
+
+        scroll.addView(root);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(safe(vehicle,"loan_no")).setView(scroll).setNegativeButton("CLOSE",null).create();
+        dialog.show();
+    }
+
+    private LinearLayout detailV3Section(String title) {
+        LinearLayout s=new LinearLayout(this); s.setOrientation(LinearLayout.VERTICAL); s.setPadding(16,16,16,16); s.setBackgroundColor(Color.WHITE);
+        if (!title.isEmpty()) s.addView(text(title,18,Color.rgb(45,45,58),true));
+        return s;
+    }
+    private void detailV3Row(LinearLayout box,String label,String value) {
+        LinearLayout r=new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); r.setPadding(0,5,0,5);
+        r.addView(text(label+":",15,Color.rgb(65,78,92),true),new LinearLayout.LayoutParams(0,-2,.42f));
+        r.addView(text(value,15,Color.rgb(65,78,92),false),new LinearLayout.LayoutParams(0,-2,.58f)); box.addView(r);
+    }
+    private void detailV3Confirmed(LinearLayout box,JSONObject v,String p) {
+        String k=p.toLowerCase(Locale.ROOT); String n=detailV3First(v,k+"_name","confirmed_"+k+"_name"); String no=detailV3First(v,k+"_no","confirmed_"+k+"_no");
+        LinearLayout r=new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); r.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout names=new LinearLayout(this); names.setOrientation(LinearLayout.VERTICAL); names.addView(text(p+" Name: "+n,15,Color.rgb(65,78,92),true)); names.addView(text("No.: "+no,15,Color.rgb(65,78,92),false));
+        r.addView(names,new LinearLayout.LayoutParams(0,-2,1f)); Button wa=detailV3Button("WhatsApp",Color.rgb(76,175,80),Color.WHITE); wa.setOnClickListener(x -> shareWhatsApp(v)); r.addView(wa,new LinearLayout.LayoutParams(125,56)); box.addView(r);
+    }
+    private Button detailV3Button(String title,int bg,int fg) { Button b=new Button(this); b.setText(title); b.setTextSize(13); b.setAllCaps(false); b.setTextColor(fg); b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(bg)); return b; }
+    private String detailV3First(JSONObject o,String a,String b) { String x=safe(o,a); return "N/A".equals(x)?safe(o,b):x; }
+'''
+
+        String patched = source.substring(0, methodStart) + replacement + source.substring(close + 1)
+        file.write(patched, 'UTF-8')
+    }
+}
+
+tasks.matching { it.name == 'preBuild' }.configureEach { dependsOn patchVehicleDetailV2 }
