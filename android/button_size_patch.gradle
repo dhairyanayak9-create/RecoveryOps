@@ -1,0 +1,64 @@
+def patchButtonSizes = tasks.register('patchButtonSizes') {
+    doLast {
+        File file = file('src/main/java/com/recoveryops/MainActivity.java')
+        String source = file.getText('UTF-8')
+        if (source.contains('RECOVERYOPS_BUTTON_SIZE_V1')) return
+
+        String marker = '        initViews();'
+        int markerPos = source.indexOf(marker)
+        if (markerPos < 0) throw new GradleException('initViews call not found')
+
+        source = source.substring(0, markerPos + marker.length()) +
+                '\n\n        enlargeApplicationButtons();' +
+                source.substring(markerPos + marker.length())
+
+        String classMarker = '\n}'
+        int classClose = source.lastIndexOf(classMarker)
+        if (classClose < 0) throw new GradleException('MainActivity class closing brace not found')
+
+        String methods = '''
+
+    // RECOVERYOPS_BUTTON_SIZE_V1
+    private void enlargeApplicationButtons() {
+        View root = findViewById(android.R.id.content);
+        enlargeButtonsRecursive(root);
+    }
+
+    private void enlargeButtonsRecursive(View view) {
+        if (view instanceof Button) {
+            Button b = (Button) view;
+            b.setMinHeight(dp(70));
+            b.setMinimumHeight(dp(70));
+            b.setMinWidth(dp(110));
+            b.setMinimumWidth(dp(110));
+            b.setPadding(dp(18), dp(10), dp(18), dp(10));
+            float current = b.getTextSize() / getResources().getDisplayMetrics().scaledDensity;
+            if (current < 15f) b.setTextSize(15f);
+        } else if (view instanceof ImageButton) {
+            ImageButton b = (ImageButton) view;
+            b.setMinHeight(dp(64));
+            b.setMinimumHeight(dp(64));
+            b.setMinWidth(dp(64));
+            b.setMinimumWidth(dp(64));
+            b.setPadding(dp(14), dp(14), dp(14), dp(14));
+        }
+
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                enlargeButtonsRecursive(group.getChildAt(i));
+            }
+        }
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+'''
+
+        source = source.substring(0, classClose) + methods + source.substring(classClose)
+        file.write(source, 'UTF-8')
+    }
+}
+
+tasks.matching { it.name == 'preBuild' }.configureEach { dependsOn patchButtonSizes }
