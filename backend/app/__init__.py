@@ -22,7 +22,6 @@ def _install_tenant_guards():
         if not aid:
             return
         try:
-            # Canonical rule: agency N always uses recovery_agency_N.
             schema = f'recovery_agency_{int(aid)}'
             if re.fullmatch(r"recovery_agency_[0-9]+", schema):
                 g.tenant_schema = schema
@@ -74,6 +73,8 @@ def create_app():
     install_tenant_security(app)
     from .import_fix import install as install_import_fix
     install_import_fix(app)
+    from .import_compat_fix import install as install_import_compat_fix
+    install_import_compat_fix()
     from .upload_bank_fix import install as install_upload_bank_fix
     install_upload_bank_fix(app)
     from .repo_agent_access_fix import install as install_repo_agent_access_fix
@@ -89,21 +90,34 @@ def ensure_schema():
         agencies=db.session.execute(text('SELECT id,name,slug,phone,email,is_active FROM public.agencies ORDER BY id')).mappings().all()
         for a in agencies:
             c=db.session.execute(text('SELECT id FROM public.agency_company WHERE name=:n OR code=:s LIMIT 1'),{'n':a['name'],'s':a['slug']}).scalar()
-            if not c:db.session.execute(text('INSERT INTO public.agency_company(name,code,phone,email,active,supabase_agency_id,created_at) VALUES(:n,:s,:p,:e,:x,:sid,now())'),{'n':a['name'],'s':a['slug'],'p':a['phone'],'e':a['email'],'x':bool(a['is_active']),'sid':str(a['id'])})
-            else:db.session.execute(text('UPDATE public.agency_company SET phone=:p,email=:e,active=:x WHERE id=:id'),{'id':c,'p':a['phone'],'e':a['email'],'x':bool(a['is_active'])})
-        db.session.execute(text('''UPDATE public."user" u SET agency_id=amap.legacy_id FROM (SELECT am.user_id,coalesce(c.id,am.agency_id) legacy_id FROM public.agency_members am LEFT JOIN public.agencies a ON a.id=am.agency_id LEFT JOIN public.agency_company c ON c.name=a.name OR c.code=a.slug WHERE am.is_active=true) amap WHERE u.id=amap.user_id AND u.agency_id IS DISTINCT FROM amap.legacy_id'''))
+            if not c:
+                db.session.execute(text('INSERT INTO public.agency_company(name,code,phone,email,active,supabase_agency_id,created_at) VALUES(:n,:s,:p,:e,:x,:sid,now())'),{'n':a['name'],'s':a['slug'],'p':a['phone'],'e':a['email'],'x':bool(a['is_active']),'sid':str(a['id'])})
+            else:
+                db.session.execute(text('UPDATE public.agency_company SET phone=:p,email=:e,active=:x WHERE id=:id'),{'id':c,'p':a['phone'],'e':a['email'],'x':bool(a['is_active'])})
+        # Canonical runtime identity is the agency_company ID. Keep existing
+        # user memberships on that same ID and never derive a different tenant ID.
+        db.session.execute(text('''UPDATE public."user" u SET agency_id=amap.agency_id FROM (
+            SELECT am.user_id, c.id AS agency_id
+            FROM public.agency_members am
+            JOIN public.agencies a ON a.id=am.agency_id
+            JOIN public.agency_company c ON c.name=a.name OR c.code=a.slug
+            WHERE am.is_active=true
+        ) amap WHERE u.id=amap.user_id AND u.agency_id IS DISTINCT FROM amap.agency_id'''))
+        # Provision missing canonical schemas from agency_company IDs.
+        rows=db.session.execute(text('SELECT id FROM public.agency_company WHERE active=true')).scalars().all()
+        for aid in rows:
+            schema=f'recovery_agency_{int(aid)}'
+            db.session.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
+            db.session.execute(text('''INSERT INTO public.agency_tenants(agency_id,legacy_agency_id,schema_name,provisioned_at,schema_version)
+                VALUES(:aid,:aid,:schema,now(),1)
+                ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''),{'aid':int(aid),'schema':schema})
         db.session.commit()
     except Exception:db.session.rollback()
 
 def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
-    """Create the isolated business schema using the same ID as the application agency."""
-    if conn is None:
-        conn=db.session.connection()
-    if conn.dialect.name != 'postgresql':
-        return None
-    # Canonical identity: agency N -> tenant N. The legacy argument is retained
-    # only for compatibility with existing callers.
-    agency_id=int(legacy_agency_id)
+    if conn is None:conn=db.session.connection()
+    if conn.dialect.name!='postgresql':return None
+    agency_id=int(modern_agency_id)
     schema=f'recovery_agency_{agency_id}'
     tables=('bank','client','vehicle','recovery_case','app_file','data_assignment','status_history_legacy','notification','sync_mutation','challan','chat_conversation','chat_message','report')
     conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
@@ -113,18 +127,14 @@ def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
         for conname in fks:
             safe=str(conname).replace('"','""')
             conn.execute(text(f'ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT "{safe}"'))
-    conn.execute(text('''INSERT INTO public.agency_tenants(agency_id,legacy_agency_id,schema_name,provisioned_at,schema_version) VALUES(:modern,:legacy,:schema,now(),1) ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''),{'modern':int(modern_agency_id),'legacy':agency_id,'schema':schema})
+    conn.execute(text('''INSERT INTO public.agency_tenants(agency_id,legacy_agency_id,schema_name,provisioned_at,schema_version) VALUES(:modern,:legacy,:schema,now(),1) ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''),{'modern':agency_id,'legacy':agency_id,'schema':schema})
     return schema
 
 def _install_agency_provision_hook(AgencyCompany):
     global _agency_provision_hook_installed
-    if _agency_provision_hook_installed:
-        return
+    if _agency_provision_hook_installed:return
     @event.listens_for(AgencyCompany,'after_insert')
     def _after_agency_company_insert(mapper,connection,target):
-        if connection.dialect.name!='postgresql':
-            return
-        row=connection.execute(text('SELECT id FROM public.agencies WHERE name=:n OR slug=:s LIMIT 1'),{'n':target.name,'s':target.code}).scalar()
-        if row is not None:
-            _provision_tenant_schema(int(row),int(target.id),conn=connection)
+        if connection.dialect.name!='postgresql':return
+        _provision_tenant_schema(int(target.id),int(target.id),conn=connection)
     _agency_provision_hook_installed=True
