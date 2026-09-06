@@ -165,10 +165,13 @@ def patchVehicleDetail = tasks.register('patchVehicleDetail') {
 
 '''
 
-        String regex = '(?s)    private void showDetails\\(JSONObject vehicle\\) \\{.*?\\n    private String safe\\('
+        // The Android source has changed since the first patch was written.
+        // Locate the existing detail method by its structure instead of relying
+        // on the exact method name/signature, then replace it through safe().
+        String regex = '(?s)\\bprivate\\s+void\\s+\\w*Details\\s*\\([^)]*\\bJSONObject\\s+\\w+[^)]*\\)\\s*\\{.*?\\n\\s*private\\s+String\\s+safe\\('
         String patched = source.replaceFirst(regex, java.util.regex.Matcher.quoteReplacement(replacement + '    private String safe('))
         if (patched == source) {
-            throw new GradleException('Vehicle detail showDetails block was not found')
+            throw new GradleException('Vehicle detail method was not found; source signature changed')
         }
         file.write(patched, 'UTF-8')
     }
