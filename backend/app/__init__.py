@@ -16,11 +16,6 @@ def _agency_id():
 def _install_tenant_guards():
     from .models import TENANT_MODELS
 
-    # Flask request hooks set search_path during normal HTTP requests.
-    # Background import workers do not run those hooks, so establish the
-    # tenant schema whenever a SQLAlchemy transaction begins and g.agency_id
-    # is available. Resolve both legacy and modern agency ids because older
-    # User rows use the legacy id while the control plane uses UUID/modern ids.
     @event.listens_for(Session,'after_begin')
     def _set_tenant_search_path(session, transaction, connection):
         aid = _agency_id()
@@ -35,8 +30,6 @@ def _install_tenant_guards():
                 g.tenant_schema = str(schema)
                 connection.exec_driver_sql(f'SET search_path TO "{schema}", public')
         except Exception:
-            # Never make a transaction unusable solely because the optional
-            # tenant search_path lookup failed; normal request guards remain.
             pass
     @event.listens_for(db.session,'do_orm_execute')
     def _scope(execute_state):
@@ -74,16 +67,14 @@ def create_app():
     from .models import User,Bank,Vehicle,DataAssignment,StatusHistory,Notification,SyncMutation,Client,RecoveryCase,AppFile,AgencyCompany,Challan,ChatConversation,ChatMessage,Report,UserOTP
     _install_agency_provision_hook(AgencyCompany)
     from .routes import api,web
-    from .super_admin import super_admin
-    from . import super_admin_extra,super_admin_control_v4,super_admin_routes_v5,super_admin_route_compat
-    app.register_blueprint(api,url_prefix='/api');app.register_blueprint(web);app.register_blueprint(super_admin)
+    app.register_blueprint(api,url_prefix='/api');app.register_blueprint(web)
     from .tenant_security import install as install_tenant_security
-    install_tenant_security(app);super_admin_control_v4.install(app);super_admin_routes_v5.install(app);super_admin_route_compat.install(app)
+    install_tenant_security(app)
     from .import_fix import install as install_import_fix
     install_import_fix(app)
     with app.app_context():
         if database_url.startswith('sqlite'):db.create_all()
-        ensure_schema();seed()
+        ensure_schema()
     return app
 
 def ensure_schema():
@@ -128,21 +119,3 @@ def _install_agency_provision_hook(AgencyCompany):
         if row is not None:
             _provision_tenant_schema(int(row),int(target.id),conn=connection)
     _agency_provision_hook_installed=True
-
-def seed():
-    # Production must remain control-plane-only until SUPER_ADMIN provisions an agency.
-    # Never recreate the old Demo Recovery Agency or a default admin automatically.
-    from .models import User
-    from werkzeug.security import generate_password_hash
-    su=(os.getenv('SUPER_ADMIN_USERNAME') or '').strip();se=(os.getenv('SUPER_ADMIN_EMAIL') or '').strip().lower() or None;sp=os.getenv('SUPER_ADMIN_PASSWORD') or ''
-    if not su or not sp:
-        return
-    try:
-        sa=User.query.filter(db.or_(User.username==su,User.email==se)).first()
-        if not sa:
-            db.session.add(User(agency_id=None,username=su,email=se,password_hash=generate_password_hash(sp,method='scrypt:32768:8:1'),full_name='RecoveryOps Super Admin',role='SUPER_ADMIN',active=True,is_deleted=False))
-        else:
-            sa.role='SUPER_ADMIN';sa.active=True;sa.is_deleted=False;sa.email=se or sa.email;sa.password_hash=generate_password_hash(sp,method='scrypt:32768:8:1');sa.agency_id=None
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
