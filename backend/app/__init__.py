@@ -68,6 +68,8 @@ def create_app():
     _install_agency_provision_hook(AgencyCompany)
     from .routes import api,web
     app.register_blueprint(api,url_prefix='/api');app.register_blueprint(web)
+    from .super_admin import super_admin
+    app.register_blueprint(super_admin)
     from .tenant_security import install as install_tenant_security
     install_tenant_security(app)
     from .import_fix import install as install_import_fix
