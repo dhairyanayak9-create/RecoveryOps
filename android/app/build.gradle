@@ -12,3 +12,5 @@ dependencies {
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'com.google.code.gson:gson:2.13.1'
 }
+
+apply from: '../vehicle_detail_patch.gradle'
