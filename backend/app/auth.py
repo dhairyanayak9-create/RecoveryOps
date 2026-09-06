@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from .models import User, AgencyCompany
 from . import db
 from sqlalchemy import text, event
-import re
 
 
 _tenant_routing_installed = set()
@@ -41,15 +40,27 @@ def _resolve_legacy_agency(user):
         return user.agency_id
 
 
-def _tenant_schema_for(legacy_agency_id):
-    if legacy_agency_id is None:
+def _tenant_schema_for(agency_id):
+    """One agency ID always maps to the same tenant schema: agency N -> tenant N."""
+    if agency_id is None:
         return None
     try:
-        schema = db.session.execute(
-            text("SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id=:id LIMIT 1"),
-            {"id": int(legacy_agency_id)},
+        aid = int(agency_id)
+        if aid <= 0:
+            return None
+        # Tenant identity is deliberately the same as the application's agency ID.
+        # Keep agency_tenants as a compatibility registry, but never use a separate
+        # modern/legacy ID to choose the tenant schema.
+        row = db.session.execute(
+            text("SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id=:id OR agency_id=:id LIMIT 1"),
+            {"id": aid},
         ).scalar()
-        return str(schema) if schema and str(schema).startswith("recovery_agency_") else None
+        expected = f"recovery_agency_{aid}"
+        if row and str(row) == expected:
+            return expected
+        # If the compatibility row is stale/missing, the canonical schema is still
+        # deterministic and can be provisioned by the agency provisioning flow.
+        return expected
     except Exception:
         db.session.rollback()
         return None
@@ -104,7 +115,6 @@ def current_user():
         if not user:
             return None
 
-        # SUPER_ADMIN is intentionally standalone: it has no tenant binding.
         if user.role == "SUPER_ADMIN":
             g.agency_id = None
             g.tenant_schema = None
@@ -157,7 +167,6 @@ def roles(*allowed):
     def deco(fn):
         @wraps(fn)
         def wrapper(user, *args, **kwargs):
-            # Standalone Super Admin bypasses tenant role restrictions.
             if user.role != "SUPER_ADMIN" and user.role not in allowed:
                 return jsonify({"error": "Forbidden"}), 403
             if user.role == "SUPER_ADMIN":
