@@ -13,4 +13,4 @@ dependencies {
     implementation 'com.google.code.gson:gson:2.13.1'
 }
 
-apply from: '../vehicle_detail_patch.gradle'
+apply from: '../vehicle_detail_patch_v2.gradle'
