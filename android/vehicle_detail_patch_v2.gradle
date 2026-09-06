@@ -4,15 +4,11 @@ def patchVehicleDetailV2 = tasks.register('patchVehicleDetailV2') {
         String source = file.getText('UTF-8')
         if (source.contains('RECOVERYOPS_SCREEN_V3')) return
 
-        String marker = 'showDetails('
-        int call = source.indexOf(marker)
-        if (call < 0) throw new GradleException('showDetails method not found')
+        String signature = 'private void showDetails('
+        int methodStart = source.indexOf(signature)
+        if (methodStart < 0) throw new GradleException('showDetails method signature not found')
 
-        int methodStart = source.lastIndexOf('private ', call)
-        if (methodStart < 0) methodStart = source.lastIndexOf('void ', call)
-        if (methodStart < 0) throw new GradleException('showDetails method start not found')
-
-        int open = source.indexOf('{', call)
+        int open = source.indexOf('{', methodStart)
         if (open < 0) throw new GradleException('showDetails opening brace not found')
         int depth = 0
         int close = -1
@@ -43,10 +39,12 @@ def patchVehicleDetailV2 = tasks.register('patchVehicleDetailV2') {
         GradientDrawable topBg = new GradientDrawable();
         topBg.setColor(Color.rgb(198,24,48)); topBg.setCornerRadius(14);
         top.setBackground(topBg);
-        top.addView(text(safe(vehicle,"status"),20,Color.WHITE,true), new LinearLayout.LayoutParams(0,60,1f));
+        TextView status = text(safe(vehicle,"status"),20,Color.WHITE,true);
+        status.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(status, new LinearLayout.LayoutParams(0,72,1f));
         Button kit = detailV3Button("REPO KIT", Color.rgb(255,218,72), Color.rgb(35,35,35));
         kit.setOnClickListener(v -> shareWhatsApp(vehicle));
-        top.addView(kit,new LinearLayout.LayoutParams(130,60));
+        top.addView(kit,new LinearLayout.LayoutParams(160,72));
         root.addView(top);
 
         LinearLayout customer = detailV3Section("");
@@ -89,8 +87,8 @@ def patchVehicleDetailV2 = tasks.register('patchVehicleDetailV2') {
         Button wa = detailV3Button("WhatsApp",Color.rgb(76,175,80),Color.WHITE);
         sms.setOnClickListener(v -> Toast.makeText(this,"SMS attachment action",Toast.LENGTH_SHORT).show());
         wa.setOnClickListener(v -> shareWhatsApp(vehicle));
-        actions.addView(sms,new LinearLayout.LayoutParams(0,64,1f));
-        LinearLayout.LayoutParams wap = new LinearLayout.LayoutParams(0,64,1f); wap.leftMargin=10;
+        actions.addView(sms,new LinearLayout.LayoutParams(0,76,1f));
+        LinearLayout.LayoutParams wap = new LinearLayout.LayoutParams(0,76,1f); wap.leftMargin=10;
         actions.addView(wa,wap); at.addView(actions); root.addView(at);
 
         scroll.addView(root);
@@ -100,21 +98,23 @@ def patchVehicleDetailV2 = tasks.register('patchVehicleDetailV2') {
 
     private LinearLayout detailV3Section(String title) {
         LinearLayout s=new LinearLayout(this); s.setOrientation(LinearLayout.VERTICAL); s.setPadding(16,16,16,16); s.setBackgroundColor(Color.WHITE);
-        if (!title.isEmpty()) s.addView(text(title,18,Color.rgb(45,45,58),true));
+        if (!title.isEmpty()) s.addView(text(title,19,Color.rgb(45,45,58),true));
         return s;
     }
     private void detailV3Row(LinearLayout box,String label,String value) {
-        LinearLayout r=new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); r.setPadding(0,5,0,5);
-        r.addView(text(label+":",15,Color.rgb(65,78,92),true),new LinearLayout.LayoutParams(0,-2,.42f));
-        r.addView(text(value,15,Color.rgb(65,78,92),false),new LinearLayout.LayoutParams(0,-2,.58f)); box.addView(r);
+        LinearLayout r=new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); r.setPadding(0,7,0,7);
+        TextView l=text(label+":",16,Color.rgb(65,78,92),true); l.setMinHeight(42);
+        TextView v=text(value,16,Color.rgb(65,78,92),false); v.setMinHeight(42);
+        r.addView(l,new LinearLayout.LayoutParams(0,-2,.42f));
+        r.addView(v,new LinearLayout.LayoutParams(0,-2,.58f)); box.addView(r);
     }
     private void detailV3Confirmed(LinearLayout box,JSONObject v,String p) {
         String k=p.toLowerCase(Locale.ROOT); String n=detailV3First(v,k+"_name","confirmed_"+k+"_name"); String no=detailV3First(v,k+"_no","confirmed_"+k+"_no");
-        LinearLayout r=new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); r.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout names=new LinearLayout(this); names.setOrientation(LinearLayout.VERTICAL); names.addView(text(p+" Name: "+n,15,Color.rgb(65,78,92),true)); names.addView(text("No.: "+no,15,Color.rgb(65,78,92),false));
-        r.addView(names,new LinearLayout.LayoutParams(0,-2,1f)); Button wa=detailV3Button("WhatsApp",Color.rgb(76,175,80),Color.WHITE); wa.setOnClickListener(x -> shareWhatsApp(v)); r.addView(wa,new LinearLayout.LayoutParams(125,56)); box.addView(r);
+        LinearLayout r=new LinearLayout(this); r.setOrientation(LinearLayout.HORIZONTAL); r.setGravity(Gravity.CENTER_VERTICAL); r.setPadding(0,5,0,5);
+        LinearLayout names=new LinearLayout(this); names.setOrientation(LinearLayout.VERTICAL); names.addView(text(p+" Name: "+n,16,Color.rgb(65,78,92),true)); names.addView(text("No.: "+no,16,Color.rgb(65,78,92),false));
+        r.addView(names,new LinearLayout.LayoutParams(0,-2,1f)); Button wa=detailV3Button("WhatsApp",Color.rgb(76,175,80),Color.WHITE); wa.setOnClickListener(x -> shareWhatsApp(v)); r.addView(wa,new LinearLayout.LayoutParams(150,64)); box.addView(r);
     }
-    private Button detailV3Button(String title,int bg,int fg) { Button b=new Button(this); b.setText(title); b.setTextSize(13); b.setAllCaps(false); b.setTextColor(fg); b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(bg)); return b; }
+    private Button detailV3Button(String title,int bg,int fg) { Button b=new Button(this); b.setText(title); b.setTextSize(16); b.setAllCaps(false); b.setTextColor(fg); b.setGravity(Gravity.CENTER); b.setMinHeight(64); b.setPadding(14,8,14,8); b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(bg)); return b; }
     private String detailV3First(JSONObject o,String a,String b) { String x=safe(o,a); return "N/A".equals(x)?safe(o,b):x; }
 '''
 
