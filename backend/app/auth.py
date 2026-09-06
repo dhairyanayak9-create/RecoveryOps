@@ -76,6 +76,14 @@ def _install_tenant_sql_routing():
     _tenant_routing_installed.add(key)
 
 
+def _install_repo_agent_access():
+    try:
+        from .repo_agent_access_fix import install
+        install()
+    except Exception:
+        current_app.logger.exception("Repo Agent access bridge installation failed")
+
+
 def make_token(user):
     return jwt.encode({
         "sub": str(user.id),
@@ -114,6 +122,7 @@ def current_user():
         if not g.tenant_schema:
             return None
         _install_tenant_sql_routing()
+        _install_repo_agent_access()
         return user
     except Exception:
         return None
@@ -139,6 +148,7 @@ def auth_required(fn):
         if not g.tenant_schema:
             return jsonify({"error": "Agency data store is not provisioned"}), 503
         _install_tenant_sql_routing()
+        _install_repo_agent_access()
         return fn(user, *args, **kwargs)
     return wrapper
 
@@ -160,6 +170,7 @@ def roles(*allowed):
             if not g.tenant_schema:
                 return jsonify({"error": "Agency data store is not provisioned"}), 503
             _install_tenant_sql_routing()
+            _install_repo_agent_access()
             return fn(user, *args, **kwargs)
         return wrapper
     return deco
