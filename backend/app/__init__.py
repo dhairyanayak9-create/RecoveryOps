@@ -22,12 +22,10 @@ def _install_tenant_guards():
         if not aid:
             return
         try:
-            schema = connection.execute(
-                text("SELECT schema_name FROM public.agency_tenants WHERE legacy_agency_id=:aid OR agency_id=:aid LIMIT 1"),
-                {"aid": int(aid)},
-            ).scalar()
-            if schema and re.fullmatch(r"recovery_agency_[0-9]+", str(schema)):
-                g.tenant_schema = str(schema)
+            # Canonical rule: agency N always uses recovery_agency_N.
+            schema = f'recovery_agency_{int(aid)}'
+            if re.fullmatch(r"recovery_agency_[0-9]+", schema):
+                g.tenant_schema = schema
                 connection.exec_driver_sql(f'SET search_path TO "{schema}", public')
         except Exception:
             pass
@@ -98,12 +96,15 @@ def ensure_schema():
     except Exception:db.session.rollback()
 
 def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
-    """Create one isolated business schema and copy the legacy table shapes into it."""
+    """Create the isolated business schema using the same ID as the application agency."""
     if conn is None:
         conn=db.session.connection()
     if conn.dialect.name != 'postgresql':
         return None
-    schema=f'recovery_agency_{int(modern_agency_id)}'
+    # Canonical identity: agency N -> tenant N. The legacy argument is retained
+    # only for compatibility with existing callers.
+    agency_id=int(legacy_agency_id)
+    schema=f'recovery_agency_{agency_id}'
     tables=('bank','client','vehicle','recovery_case','app_file','data_assignment','status_history_legacy','notification','sync_mutation','challan','chat_conversation','chat_message','report')
     conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
     for table in tables:
@@ -112,7 +113,7 @@ def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
         for conname in fks:
             safe=str(conname).replace('"','""')
             conn.execute(text(f'ALTER TABLE "{schema}"."{table}" DROP CONSTRAINT "{safe}"'))
-    conn.execute(text('''INSERT INTO public.agency_tenants(agency_id,legacy_agency_id,schema_name,provisioned_at,schema_version) VALUES(:modern,:legacy,:schema,now(),1) ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''),{'modern':int(modern_agency_id),'legacy':int(legacy_agency_id),'schema':schema})
+    conn.execute(text('''INSERT INTO public.agency_tenants(agency_id,legacy_agency_id,schema_name,provisioned_at,schema_version) VALUES(:modern,:legacy,:schema,now(),1) ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''),{'modern':int(modern_agency_id),'legacy':agency_id,'schema':schema})
     return schema
 
 def _install_agency_provision_hook(AgencyCompany):
