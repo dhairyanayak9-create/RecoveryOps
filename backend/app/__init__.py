@@ -78,6 +78,8 @@ def create_app():
     install_import_fix(app)
     from .upload_bank_fix import install as install_upload_bank_fix
     install_upload_bank_fix(app)
+    from .repo_agent_access_fix import install as install_repo_agent_access_fix
+    install_repo_agent_access_fix()
     with app.app_context():
         if database_url.startswith('sqlite'):db.create_all()
         ensure_schema()
