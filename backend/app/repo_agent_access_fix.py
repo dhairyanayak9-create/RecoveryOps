@@ -17,10 +17,10 @@ def install():
 
     def accessible_vehicle_query(user, write=False):
         if user.role != "REPO_AGENT":
-            return original(user, write)
-
-        # Repo Agents can work with the data of their authenticated agency.
-        # Tenant search_path + ORM tenant guards prevent cross-agency access.
+            try:
+                return original(user, write)
+            except TypeError:
+                return original(user)
         return Vehicle.query
 
     accessible_vehicle_query._recoveryops_repo_agent_fix = True
