@@ -61,10 +61,20 @@ def install(app):
                 },
             ).mappings().first()
 
-            if bank:
-                # Legacy tenant tables use the legacy agency_company id.
-                g.agency_id = int(bank["agency_id"])
-                g.tenant_schema = schema
+            if not bank:
+                return jsonify({
+                    "error": "Selected bank does not exist in your agency."
+                }), 404
+
+            # The agency lookup above starts a DB transaction. Changing g.agency_id
+            # alone is not enough because the tenant search_path is set at transaction
+            # begin. Explicitly set it here so the core importer validates the same
+            # bank from the selected agency tenant schema instead of public.bank.
+            g.agency_id = int(user.agency_id)
+            g.tenant_schema = schema
+            db.session.connection().exec_driver_sql(
+                f'SET search_path TO "{schema}", public'
+            )
 
             return core(user, *args, **kwargs)
         except Exception:
