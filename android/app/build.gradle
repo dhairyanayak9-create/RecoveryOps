@@ -14,3 +14,4 @@ dependencies {
 }
 
 apply from: '../vehicle_detail_patch_v2.gradle'
+apply from: '../button_size_patch.gradle'
