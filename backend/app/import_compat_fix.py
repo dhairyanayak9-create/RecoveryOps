@@ -11,6 +11,7 @@ from sqlalchemy import text
 def install():
     from . import import_fix
     from . import db
+    from . import routes
 
     def resolve_schema(agency_id):
         if agency_id is None:
@@ -72,3 +73,8 @@ def install():
     import_fix._resolve_schema = resolve_schema
     import_fix._column_mapping = column_mapping
     import_fix._delete_previous_bank_uploads = delete_previous_bank_uploads
+
+    # routes.import_file starts the background worker using the module-global
+    # _process_import_job symbol. Point that symbol at the streaming importer so
+    # the production worker actually uses the header-detection/tenant fixes above.
+    routes._process_import_job = import_fix._process_import_job_streaming
