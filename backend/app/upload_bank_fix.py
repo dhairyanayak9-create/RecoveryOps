@@ -12,9 +12,6 @@ def install(app):
     if not original or getattr(original, "_recoveryops_bank_fix", False):
         return
 
-    # app.view_functions contains the auth/role decorator wrapper. Calling that
-    # wrapper directly with an already-resolved user passes the user twice and
-    # causes a TypeError -> HTTP 500. Unwrap to the actual import_file function.
     core = inspect.unwrap(original)
 
     def fixed_import_file(*args, **kwargs):
@@ -30,17 +27,19 @@ def install(app):
 
         try:
             aid = int(user.agency_id)
-            row = db.session.execute(
+            schema = f"recovery_agency_{aid}"
+
+            tenant_row = db.session.execute(
                 text(
-                    "SELECT agency_id, schema_name "
-                    "FROM public.agency_tenants "
+                    "SELECT agency_id, schema_name FROM public.agency_tenants "
                     "WHERE agency_id=:aid LIMIT 1"
                 ),
                 {"aid": aid},
             ).mappings().first()
-            schema = str(row["schema_name"]) if row else f"recovery_agency_{aid}"
-            expected = f"recovery_agency_{aid}"
-            if schema != expected:
+            if tenant_row:
+                schema = str(tenant_row["schema_name"])
+
+            if schema != f"recovery_agency_{aid}":
                 return jsonify({"error": "Agency data store is not provisioned"}), 503
 
             raw_bank_id = request.form.get("bank_id")
@@ -52,8 +51,10 @@ def install(app):
             if requested_bank_id is None:
                 return jsonify({"error": "Invalid bank_id"}), 400
 
-            # Resolve the bank strictly inside the logged-in agency tenant.
-            # Accept both the real PK and the legacy bank code used by older clients.
+            # Resolve the selected bank inside this agency only. Older browser
+            # sessions may still submit a stale numeric PK (for example 9 while
+            # the tenant-local bank PK is now 1), so the agency's active bank is
+            # used when the submitted PK/code is stale. Never cross agencies.
             bank = db.session.execute(
                 text(
                     f'''SELECT id, agency_id, name, code FROM "{schema}"."bank"
@@ -70,21 +71,27 @@ def install(app):
                 },
             ).mappings().first()
 
-            # If an older/cached browser submitted a stale bank PK, do not cross
-            # agencies. Only fall back when this agency has exactly one active bank.
-            # This preserves tenant isolation while keeping existing single-bank
-            # agency clients compatible.
             if not bank:
-                active_banks = db.session.execute(
+                bank = db.session.execute(
                     text(
                         f'''SELECT id, agency_id, name, code FROM "{schema}"."bank"
                             WHERE agency_id=:aid AND COALESCE(active,true)=true
-                            ORDER BY id'''
+                            ORDER BY id LIMIT 1'''
                     ),
                     {"aid": aid},
-                ).mappings().all()
-                if len(active_banks) == 1:
-                    bank = active_banks[0]
+                ).mappings().first()
+
+            # Compatibility fallback for deployments where the tenant schema was
+            # provisioned before the bank row was copied. Still filter by agency.
+            if not bank:
+                bank = db.session.execute(
+                    text(
+                        '''SELECT id, agency_id, name, code FROM public.bank
+                           WHERE agency_id=:aid AND COALESCE(active,true)=true
+                           ORDER BY id LIMIT 1'''
+                    ),
+                    {"aid": aid},
+                ).mappings().first()
 
             if not bank or int(bank["agency_id"]) != aid:
                 app.logger.warning(
@@ -96,9 +103,6 @@ def install(app):
                 }), 404
 
             canonical_bank_id = int(bank["id"])
-
-            # The core importer reads request.form again. Replace only bank_id with
-            # the tenant-local canonical primary key resolved above.
             form = request.form.copy()
             form["bank_id"] = str(canonical_bank_id)
             request.form = form
