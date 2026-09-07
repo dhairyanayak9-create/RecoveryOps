@@ -1,5 +1,5 @@
 import inspect
-from flask import g, jsonify
+from flask import g, jsonify, request
 from sqlalchemy import text
 
 from . import db
@@ -26,51 +26,73 @@ def install(app):
             return jsonify({"error": "Forbidden"}), 403
 
         try:
+            aid = int(user.agency_id)
             row = db.session.execute(
                 text(
                     "SELECT agency_id, schema_name, legacy_agency_id "
                     "FROM public.agency_tenants "
-                    "WHERE legacy_agency_id=:aid OR agency_id=:aid LIMIT 1"
+                    "WHERE agency_id=:aid OR legacy_agency_id=:aid LIMIT 1"
                 ),
-                {"aid": int(user.agency_id)},
+                {"aid": aid},
             ).mappings().first()
-            if not row:
+            schema = str(row["schema_name"]) if row else f"recovery_agency_{aid}"
+            if not schema.startswith("recovery_agency_"):
                 return jsonify({"error": "Agency data store is not provisioned"}), 503
 
-            schema = str(row["schema_name"])
-            legacy_id = int(row["legacy_agency_id"])
-            modern_id = int(row["agency_id"])
-            bank_id = request_bank_id = None
+            raw_bank_id = request.form.get("bank_id")
             try:
-                request_bank_id = int(__import__("flask").request.form.get("bank_id"))
+                requested_bank_id = int(raw_bank_id)
             except (TypeError, ValueError):
-                request_bank_id = None
+                requested_bank_id = None
 
-            if request_bank_id is None:
+            if requested_bank_id is None:
                 return core(user, *args, **kwargs)
 
+            # Bank IDs are the canonical primary key, but older UI/data could
+            # submit the bank code instead. Resolve both without crossing agencies.
             bank = db.session.execute(
                 text(
-                    f'SELECT id, agency_id FROM "{schema}"."bank" '
-                    "WHERE id=:bank_id AND agency_id IN (:legacy_id,:modern_id) LIMIT 1"
+                    f'''SELECT id, agency_id FROM "{schema}"."bank"
+                        WHERE agency_id=:aid AND (id=:bank_id OR code=:bank_code)
+                        AND COALESCE(active, true)=true
+                        LIMIT 1'''
                 ),
                 {
-                    "bank_id": request_bank_id,
-                    "legacy_id": legacy_id,
-                    "modern_id": modern_id,
+                    "aid": aid,
+                    "bank_id": requested_bank_id,
+                    "bank_code": str(requested_bank_id),
                 },
             ).mappings().first()
+
+            # Compatibility fallback: public.bank mirrors the tenant bank IDs.
+            if not bank:
+                bank = db.session.execute(
+                    text(
+                        "SELECT id, agency_id FROM public.bank "
+                        "WHERE agency_id=:aid AND (id=:bank_id OR code=:bank_code) "
+                        "AND COALESCE(active, true)=true LIMIT 1"
+                    ),
+                    {
+                        "aid": aid,
+                        "bank_id": requested_bank_id,
+                        "bank_code": str(requested_bank_id),
+                    },
+                ).mappings().first()
 
             if not bank:
                 return jsonify({
                     "error": "Selected bank does not exist in your agency."
                 }), 404
 
-            # The agency lookup above starts a DB transaction. Changing g.agency_id
-            # alone is not enough because the tenant search_path is set at transaction
-            # begin. Explicitly set it here so the core importer validates the same
-            # bank from the selected agency tenant schema instead of public.bank.
-            g.agency_id = int(user.agency_id)
+            canonical_bank_id = int(bank["id"])
+
+            # The core importer reads request.form again. Replace only the bank_id
+            # field with the canonical primary key resolved above.
+            form = request.form.copy()
+            form["bank_id"] = str(canonical_bank_id)
+            request.form = form
+
+            g.agency_id = aid
             g.tenant_schema = schema
             db.session.connection().exec_driver_sql(
                 f'SET search_path TO "{schema}", public'
