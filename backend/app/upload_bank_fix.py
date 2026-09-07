@@ -1,3 +1,4 @@
+import inspect
 from flask import g, jsonify, request
 from sqlalchemy import text
 
@@ -11,13 +12,18 @@ def install(app):
     if not original or getattr(original, "_recoveryops_bank_fix", False):
         return
 
+    # app.view_functions contains the auth/role decorator wrapper. Calling that
+    # wrapper directly with an already-resolved user passes the user twice and
+    # causes a TypeError -> HTTP 500. Unwrap to the actual import_file function.
+    core = inspect.unwrap(original)
+
     def fixed_import_file(*args, **kwargs):
         user = current_user()
         if not user or not user.active or getattr(user, "is_deleted", False):
             return jsonify({"error": "Authentication required"}), 401
 
         if user.role == "SUPER_ADMIN":
-            return original(user, *args, **kwargs)
+            return core(user, *args, **kwargs)
 
         if user.role not in {"ADMIN", "STAFF"}:
             return jsonify({"error": "Forbidden"}), 403
@@ -81,8 +87,7 @@ def install(app):
                     bank = active_banks[0]
 
             if not bank or int(bank["agency_id"]) != aid:
-                current_app = app.logger
-                current_app.warning(
+                app.logger.warning(
                     "Bank resolution failed: agency=%s requested_bank_id=%s schema=%s",
                     aid, requested_bank_id, schema,
                 )
@@ -92,8 +97,8 @@ def install(app):
 
             canonical_bank_id = int(bank["id"])
 
-            # The original route validates Bank against the tenant search_path.
-            # Pass the canonical tenant PK so the core route and worker use the same ID.
+            # The core importer reads request.form again. Replace only bank_id with
+            # the tenant-local canonical primary key resolved above.
             form = request.form.copy()
             form["bank_id"] = str(canonical_bank_id)
             request.form = form
@@ -104,7 +109,7 @@ def install(app):
                 f'SET search_path TO "{schema}", public'
             )
 
-            return original(user, *args, **kwargs)
+            return core(user, *args, **kwargs)
         except Exception:
             db.session.rollback()
             raise
