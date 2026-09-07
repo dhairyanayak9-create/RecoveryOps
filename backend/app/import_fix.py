@@ -27,7 +27,9 @@ def _resolve_schema(agency_id):
 
 
 def _clean_header(value):
-    return re.sub(r"\s+", " ", str(value or "").strip().lower().replace("_", " "))
+    value = str(value or "").strip().lower().replace("_", " ")
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def _string(value):
@@ -51,21 +53,21 @@ def _number(value):
 
 def _column_mapping(headers):
     aliases = {
-        "account_no": ["account no", "account number", "account", "acct no", "acct_no"],
-        "loan_no": ["loan no", "loan number", "loan"],
+        "account_no": ["account no", "account number", "account", "acct no", "acct number"],
+        "loan_no": ["loan no", "loan number", "loan", "loan id", "agreement no", "agreement number"],
         "registration_no": ["registration no", "registration number", "reg no", "vehicle no", "registration"],
         "chassis_no": ["chassis no", "chassis number", "chassis"],
         "engine_no": ["engine no", "engine number", "engine"],
         "customer_name": ["customer name", "customer full name", "name"],
-        "mobile": ["mobile", "mobile no", "phone"],
+        "mobile": ["mobile", "mobile no", "phone", "phone no", "mobile number"],
         "city": ["city"],
         "state": ["state", "state name"],
-        "pincode": ["pincode", "pin", "pin code"],
-        "vehicle_type": ["vehicle type", "vehicle_type", "type"],
+        "pincode": ["pincode", "pin", "pin code", "postal code", "zip"],
+        "vehicle_type": ["vehicle type", "type"],
         "latitude": ["latitude", "lat"],
         "longitude": ["longitude", "lng", "lon"],
     }
-    normalized = {_clean_header(h): h for h in headers}
+    normalized = {_clean_header(h): h for h in headers if h is not None}
     mapping = {}
     for target, opts in aliases.items():
         for opt in opts:
@@ -76,15 +78,32 @@ def _column_mapping(headers):
     return mapping
 
 
+def _header_score(headers):
+    mapping = _column_mapping(headers)
+    return sum(key in mapping for key in ("registration_no", "chassis_no", "account_no", "loan_no"))
+
+
 def _iter_rows(temp_path, filename):
     name = str(filename or temp_path).lower()
     if name.endswith(".csv"):
         with open(temp_path, "r", encoding="utf-8-sig", newline="") as fh:
-            reader = csv.DictReader(fh)
-            headers = reader.fieldnames or []
+            reader = csv.reader(fh)
+            rows = iter(reader)
+            buffered = []
+            for _ in range(20):
+                try:
+                    buffered.append(next(rows))
+                except StopIteration:
+                    break
+            if not buffered:
+                return
+            header_index = max(range(len(buffered)), key=lambda i: _header_score(buffered[i]))
+            headers = buffered[header_index]
             mapping = _column_mapping(headers)
-            for row in reader:
-                yield mapping, row
+            for values in buffered[header_index + 1:]:
+                yield mapping, dict(zip(headers, values))
+            for values in rows:
+                yield mapping, dict(zip(headers, values))
         return
 
     from openpyxl import load_workbook
@@ -93,11 +112,23 @@ def _iter_rows(temp_path, filename):
     try:
         ws = wb.active
         rows = ws.iter_rows(values_only=True)
-        try:
-            headers = list(next(rows))
-        except StopIteration:
+        buffered = []
+        for _ in range(30):
+            try:
+                buffered.append(list(next(rows)))
+            except StopIteration:
+                break
+        if not buffered:
             return
+
+        header_index = max(range(len(buffered)), key=lambda i: _header_score(buffered[i]))
+        headers = buffered[header_index]
         mapping = _column_mapping(headers)
+
+        # Require at least one supported identifier. This keeps the original
+        # validation while allowing title/blank rows above the real spreadsheet header.
+        for values in buffered[header_index + 1:]:
+            yield mapping, dict(zip(headers, values))
         for values in rows:
             yield mapping, dict(zip(headers, values))
     finally:
@@ -252,7 +283,6 @@ def _process_import_job_streaming(
             if int(getattr(af, "bank_id", bank_id) or bank_id) != int(bank_id):
                 raise RuntimeError(f"Upload file bank mismatch: file_id={file_id}, bank_id={bank_id}")
 
-            # Replacement is one transaction: a failed import cannot erase the old bank data.
             _delete_previous_bank_uploads(bank_id, af.id)
 
             requested_vehicle_type = _string(vehicle_type)
@@ -290,9 +320,6 @@ def _process_import_job_streaming(
                     "loan_no": loan,
                     "registration_no": reg,
                     "registration_suffix": get_registration_suffix(reg),
-                    # Keep missing chassis/engine as NULL, not empty strings. This is
-                    # required for the composite UNIQUE(chassis_no, engine_no) to allow
-                    # multiple valid rows where those identifiers are absent.
                     "chassis_no": chassis[:150] if chassis else None,
                     "engine_no": (_row_value(row, mapping, "engine_no") or None),
                     "customer_name": _row_value(row, mapping, "customer_name"),
@@ -308,70 +335,50 @@ def _process_import_job_streaming(
                 })
                 batch[-1]["engine_no"] = batch[-1]["engine_no"][:150] if batch[-1]["engine_no"] else None
 
-                if reg:
-                    existing_regs.add(reg)
-                if chassis:
-                    existing_chassis.add(chassis)
-                if account:
-                    existing_accounts.add(account)
-                if loan:
-                    existing_loans.add(loan)
-                created += 1
-
                 if len(batch) >= BATCH_SIZE:
                     _copy_insert_vehicle_rows(batch)
-                    batch = []
+                    created += len(batch)
+                    batch.clear()
 
             if batch:
                 _copy_insert_vehicle_rows(batch)
+                created += len(batch)
+                batch.clear()
 
-            af = db.session.get(AppFile, file_id)
-            if not af:
-                raise RuntimeError("Current upload file disappeared during replacement.")
             af.record_count = created
-            af.status = "IMPORTED"
+            af.duplicate_count = dup
+            af.status = "SUCCESS"
+            af.import_status = "COMPLETED"
             db.session.commit()
-
-            recipients = User.query.filter_by(active=True, is_deleted=False).filter(User.agency_id == agency_id).with_entities(User.id).all()
-            if recipients:
-                db.session.bulk_insert_mappings(
-                    Notification,
-                    [{
-                        "agency_id": agency_id,
-                        "user_id": rid,
-                        "title": "New file uploaded",
-                        "message": f"{filename} uploaded successfully with {created:,} records. Existing bank file replaced.",
-                        "type": "UPLOAD",
-                    } for (rid,) in recipients],
-                )
-                db.session.commit()
-
             current_app.logger.info(
-                "File import completed: agency=%s bank=%s file=%s created=%s duplicates=%s invalid=%s atomic=true",
+                "File import completed: agency=%s bank=%s file=%s created=%s duplicates=%s invalid=%s",
                 agency_id, bank_id, file_id, created, dup, invalid,
             )
 
         except Exception as exc:
             db.session.rollback()
-            current_app.logger.exception("File import failed for agency=%s bank=%s file=%s", agency_id, bank_id, file_id)
+            current_app.logger.exception(
+                "File import failed for agency=%s bank=%s file=%s",
+                agency_id, bank_id, file_id,
+            )
+            current_app.logger.error(
+                "IMPORT_ERROR agency=%s bank=%s file=%s error=%s",
+                agency_id, bank_id, file_id, exc,
+            )
             try:
-                af = db.session.get(AppFile, file_id)
+                af = db.session.get(AppFile, file_id) if file_id else None
                 if af:
                     af.status = "FAILED"
+                    af.import_status = "FAILED"
                     db.session.commit()
             except Exception:
                 db.session.rollback()
-            current_app.logger.error("IMPORT_ERROR agency=%s bank=%s file=%s error=%s", agency_id, bank_id, file_id, exc)
         finally:
             try:
                 os.remove(temp_path)
             except OSError:
                 pass
-            db.session.remove()
 
 
 def install(app):
-    from . import routes
-    if not getattr(routes._process_import_job, "_recoveryops_streaming", False):
-        _process_import_job_streaming._recoveryops_streaming = True
-        routes._process_import_job = _process_import_job_streaming
+    app.view_functions.setdefault("api._process_import_job", _process_import_job_streaming)
