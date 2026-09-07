@@ -229,14 +229,42 @@ def _process_import_job_streaming(
         af = None
         try:
             schema = _resolve_schema(agency_id)
+            expected_schema = f"recovery_agency_{int(agency_id)}"
+            if schema != expected_schema:
+                raise RuntimeError(
+                    f"Agency tenant mismatch: agency_id={agency_id} schema={schema}"
+                )
             g.tenant_schema = schema
             db.session.connection().exec_driver_sql(
                 f'SET search_path TO "{schema}", public'
             )
 
+            # Never import with a bank that is not owned by this tenant.
+            bank_row = db.session.execute(
+                text(
+                    "SELECT id, agency_id FROM bank "
+                    "WHERE id=:bank_id AND agency_id=:agency_id "
+                    "AND COALESCE(active,true)=true LIMIT 1"
+                ),
+                {"bank_id": int(bank_id), "agency_id": int(agency_id)},
+            ).mappings().first()
+            if not bank_row:
+                raise RuntimeError(
+                    f"Tenant bank validation failed: agency_id={agency_id}, bank_id={bank_id}"
+                )
+
             af = db.session.get(AppFile, file_id)
             if not af:
                 return
+
+            if int(getattr(af, "agency_id", agency_id) or agency_id) != int(agency_id):
+                raise RuntimeError(
+                    f"Upload file belongs to a different agency: file_id={file_id}"
+                )
+            if int(getattr(af, "bank_id", bank_id) or bank_id) != int(bank_id):
+                raise RuntimeError(
+                    f"Upload file bank mismatch: file_id={file_id}, bank_id={bank_id}"
+                )
 
             _delete_previous_bank_uploads(bank_id, af.id)
             af = db.session.get(AppFile, file_id)
