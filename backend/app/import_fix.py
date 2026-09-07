@@ -115,7 +115,7 @@ def _row_number(row, mapping, key):
 
 
 def _delete_previous_bank_uploads(bank_id, current_file_id):
-    """Replace previous uploads for this bank using set-based SQL deletes."""
+    """Delete previous bank data inside the caller transaction; never commit here."""
     old_ids = [
         row[0]
         for row in db.session.execute(
@@ -144,7 +144,6 @@ def _delete_previous_bank_uploads(bank_id, current_file_id):
 
     db.session.execute(text(f"DELETE FROM vehicle WHERE source_file_id IN ({placeholders})"), params)
     db.session.execute(text(f"DELETE FROM app_file WHERE id IN ({placeholders})"), params)
-    db.session.commit()
 
 
 def _load_existing_identifiers():
@@ -223,7 +222,7 @@ def _process_import_job_streaming(
     uploaded_by,
     agency_id,
 ):
-    """Memory-safe streaming importer using PostgreSQL COPY for bulk inserts."""
+    """Memory-safe streaming importer with atomic bank replacement."""
     with app.app_context():
         g.agency_id = agency_id
         af = None
@@ -239,7 +238,6 @@ def _process_import_job_streaming(
                 f'SET search_path TO "{schema}", public'
             )
 
-            # Never import with a bank that is not owned by this tenant.
             bank_row = db.session.execute(
                 text(
                     "SELECT id, agency_id FROM bank "
@@ -255,7 +253,7 @@ def _process_import_job_streaming(
 
             af = db.session.get(AppFile, file_id)
             if not af:
-                return
+                raise RuntimeError("Upload file record not found.")
 
             if int(getattr(af, "agency_id", agency_id) or agency_id) != int(agency_id):
                 raise RuntimeError(
@@ -266,10 +264,9 @@ def _process_import_job_streaming(
                     f"Upload file bank mismatch: file_id={file_id}, bank_id={bank_id}"
                 )
 
+            # Everything below stays in one transaction. If parsing, COPY, or
+            # validation fails, the old bank data is restored by rollback.
             _delete_previous_bank_uploads(bank_id, af.id)
-            af = db.session.get(AppFile, file_id)
-            if not af:
-                raise RuntimeError("Current upload file disappeared during replacement.")
 
             requested_vehicle_type = _string(vehicle_type)
             mapping = None
@@ -342,41 +339,39 @@ def _process_import_job_streaming(
 
                 if len(batch) >= BATCH_SIZE:
                     _copy_insert_vehicle_rows(batch)
-                    db.session.commit()
                     batch = []
 
             if batch:
                 _copy_insert_vehicle_rows(batch)
-                db.session.commit()
 
             af = db.session.get(AppFile, file_id)
-            if af:
-                af.record_count = created
-                af.status = "IMPORTED"
+            if not af:
+                raise RuntimeError("Current upload file disappeared during replacement.")
+            af.record_count = created
+            af.status = "IMPORTED"
+            db.session.commit()
+
+            recipients_q = User.query.filter_by(active=True, is_deleted=False)
+            recipients_q = recipients_q.filter(User.agency_id == agency_id)
+            recipients = recipients_q.with_entities(User.id).all()
+            if recipients:
+                db.session.bulk_insert_mappings(
+                    Notification,
+                    [
+                        {
+                            "agency_id": agency_id,
+                            "user_id": rid,
+                            "title": "New file uploaded",
+                            "message": f"{filename} uploaded successfully with {created:,} records. Existing bank file replaced.",
+                            "type": "UPLOAD",
+                        }
+                        for (rid,) in recipients
+                    ],
+                )
                 db.session.commit()
 
-                recipients_q = User.query.filter_by(active=True, is_deleted=False)
-                if agency_id is not None:
-                    recipients_q = recipients_q.filter(User.agency_id == agency_id)
-                recipients = recipients_q.with_entities(User.id).all()
-                if recipients:
-                    db.session.bulk_insert_mappings(
-                        Notification,
-                        [
-                            {
-                                "agency_id": agency_id,
-                                "user_id": rid,
-                                "title": "New file uploaded",
-                                "message": f"{filename} uploaded successfully with {created:,} records. Existing bank file replaced.",
-                                "type": "UPLOAD",
-                            }
-                            for (rid,) in recipients
-                        ],
-                    )
-                    db.session.commit()
-
             current_app.logger.info(
-                "File import completed: bank=%s file=%s created=%s duplicates=%s invalid=%s replaced_previous=true method=COPY",
+                "File import completed: bank=%s file=%s created=%s duplicates=%s invalid=%s replaced_previous=true method=COPY atomic=true",
                 bank_id,
                 file_id,
                 created,
@@ -384,9 +379,9 @@ def _process_import_job_streaming(
                 invalid,
             )
 
-        except Exception:
+        except Exception as exc:
             db.session.rollback()
-            current_app.logger.exception("File import failed for bank %s", bank_id)
+            current_app.logger.exception("File import failed for agency=%s bank=%s file=%s", agency_id, bank_id, file_id)
             try:
                 af = db.session.get(AppFile, file_id)
                 if af:
@@ -394,6 +389,7 @@ def _process_import_job_streaming(
                     db.session.commit()
             except Exception:
                 db.session.rollback()
+            current_app.logger.error("IMPORT_ERROR agency=%s bank=%s file=%s error=%s", agency_id, bank_id, file_id, exc)
         finally:
             try:
                 os.remove(temp_path)
