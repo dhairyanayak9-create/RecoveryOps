@@ -124,9 +124,6 @@ def _iter_rows(temp_path, filename):
         header_index = max(range(len(buffered)), key=lambda i: _header_score(buffered[i]))
         headers = buffered[header_index]
         mapping = _column_mapping(headers)
-
-        # Require at least one supported identifier. This keeps the original
-        # validation while allowing title/blank rows above the real spreadsheet header.
         for values in buffered[header_index + 1:]:
             yield mapping, dict(zip(headers, values))
         for values in rows:
@@ -335,6 +332,17 @@ def _process_import_job_streaming(
                 })
                 batch[-1]["engine_no"] = batch[-1]["engine_no"][:150] if batch[-1]["engine_no"] else None
 
+                # Track identifiers as we accept each row so duplicates within the
+                # same file are also skipped before COPY hits the database constraint.
+                if reg:
+                    existing_regs.add(reg)
+                if chassis:
+                    existing_chassis.add(chassis)
+                if account:
+                    existing_accounts.add(account)
+                if loan:
+                    existing_loans.add(loan)
+
                 if len(batch) >= BATCH_SIZE:
                     _copy_insert_vehicle_rows(batch)
                     created += len(batch)
@@ -350,8 +358,29 @@ def _process_import_job_streaming(
             af.status = "SUCCESS"
             af.import_status = "COMPLETED"
             db.session.commit()
+
+            recipients = (
+                User.query
+                .filter_by(active=True, is_deleted=False)
+                .filter(User.agency_id == agency_id)
+                .with_entities(User.id)
+                .all()
+            )
+            if recipients:
+                db.session.bulk_insert_mappings(
+                    Notification,
+                    [{
+                        "agency_id": agency_id,
+                        "user_id": rid,
+                        "title": "New file uploaded",
+                        "message": f"{filename} uploaded successfully with {created:,} records. Existing bank file replaced.",
+                        "type": "UPLOAD",
+                    } for (rid,) in recipients],
+                )
+                db.session.commit()
+
             current_app.logger.info(
-                "File import completed: agency=%s bank=%s file=%s created=%s duplicates=%s invalid=%s",
+                "File import completed: agency=%s bank=%s file=%s created=%s duplicates=%s invalid=%s atomic=true",
                 agency_id, bank_id, file_id, created, dup, invalid,
             )
 
@@ -378,6 +407,7 @@ def _process_import_job_streaming(
                 os.remove(temp_path)
             except OSError:
                 pass
+            db.session.remove()
 
 
 def install(app):
