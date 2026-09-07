@@ -147,7 +147,6 @@ def _delete_previous_bank_uploads(bank_id, current_file_id):
 
 
 def _load_existing_identifiers():
-    """Load all identifiers with one DB round trip instead of four queries."""
     rows = db.session.execute(
         text(
             "SELECT registration_no, chassis_no, account_no, loan_no "
@@ -170,7 +169,6 @@ def _load_existing_identifiers():
 
 
 def _copy_insert_vehicle_rows(rows):
-    """Insert prepared rows through PostgreSQL COPY using psycopg2/psycopg3."""
     if not rows:
         return
 
@@ -188,25 +186,20 @@ def _copy_insert_vehicle_rows(rows):
     connection = db.session.connection()
     raw = connection.connection
     try:
-        if hasattr(raw, "cursor"):
-            cursor = raw.cursor()
-            try:
-                if hasattr(cursor, "copy_expert"):
-                    cursor.copy_expert(
-                        "COPY vehicle (" + ", ".join(columns) + ") FROM STDIN WITH (FORMAT CSV)",
-                        io.StringIO(csv_text),
-                    )
-                elif hasattr(cursor, "copy"):
-                    with cursor.copy(
-                        "COPY vehicle (" + ", ".join(columns) + ") FROM STDIN WITH (FORMAT CSV)"
-                    ) as copy:
-                        copy.write(csv_text)
-                else:
-                    raise RuntimeError("PostgreSQL driver does not expose COPY support")
-            finally:
-                cursor.close()
-        else:
+        cursor = raw.cursor() if hasattr(raw, "cursor") else None
+        if cursor is None:
             raise RuntimeError("PostgreSQL connection does not expose a cursor")
+        try:
+            copy_sql = "COPY vehicle (" + ", ".join(columns) + ") FROM STDIN WITH (FORMAT CSV)"
+            if hasattr(cursor, "copy_expert"):
+                cursor.copy_expert(copy_sql, io.StringIO(csv_text))
+            elif hasattr(cursor, "copy"):
+                with cursor.copy(copy_sql) as copy:
+                    copy.write(csv_text)
+            else:
+                raise RuntimeError("PostgreSQL driver does not expose COPY support")
+        finally:
+            cursor.close()
     except Exception:
         db.session.rollback()
         raise
@@ -254,18 +247,12 @@ def _process_import_job_streaming(
             af = db.session.get(AppFile, file_id)
             if not af:
                 raise RuntimeError("Upload file record not found.")
-
             if int(getattr(af, "agency_id", agency_id) or agency_id) != int(agency_id):
-                raise RuntimeError(
-                    f"Upload file belongs to a different agency: file_id={file_id}"
-                )
+                raise RuntimeError(f"Upload file belongs to a different agency: file_id={file_id}")
             if int(getattr(af, "bank_id", bank_id) or bank_id) != int(bank_id):
-                raise RuntimeError(
-                    f"Upload file bank mismatch: file_id={file_id}, bank_id={bank_id}"
-                )
+                raise RuntimeError(f"Upload file bank mismatch: file_id={file_id}, bank_id={bank_id}")
 
-            # Everything below stays in one transaction. If parsing, COPY, or
-            # validation fails, the old bank data is restored by rollback.
+            # Replacement is one transaction: a failed import cannot erase the old bank data.
             _delete_previous_bank_uploads(bank_id, af.id)
 
             requested_vehicle_type = _string(vehicle_type)
@@ -275,19 +262,13 @@ def _process_import_job_streaming(
             invalid = 0
             batch = []
             BATCH_SIZE = 10000
-
             existing_regs, existing_chassis, existing_accounts, existing_loans = _load_existing_identifiers()
 
             for row_mapping, row in _iter_rows(temp_path, filename):
                 if mapping is None:
                     mapping = row_mapping
-                    if not any(
-                        k in mapping
-                        for k in ("registration_no", "chassis_no", "account_no", "loan_no")
-                    ):
-                        raise ValueError(
-                            "File must contain Registration Number, Chassis Number, Account Number, or Loan Number column."
-                        )
+                    if not any(k in mapping for k in ("registration_no", "chassis_no", "account_no", "loan_no")):
+                        raise ValueError("File must contain Registration Number, Chassis Number, Account Number, or Loan Number column.")
 
                 reg = _row_value(row, mapping, "registration_no")
                 chassis = _row_value(row, mapping, "chassis_no")
@@ -298,12 +279,8 @@ def _process_import_job_streaming(
                     invalid += 1
                     continue
 
-                if (
-                    (reg and reg in existing_regs)
-                    or (chassis and chassis in existing_chassis)
-                    or (account and account in existing_accounts)
-                    or (loan and loan in existing_loans)
-                ):
+                if ((reg and reg in existing_regs) or (chassis and chassis in existing_chassis) or
+                    (account and account in existing_accounts) or (loan and loan in existing_loans)):
                     dup += 1
                     continue
 
@@ -313,8 +290,11 @@ def _process_import_job_streaming(
                     "loan_no": loan,
                     "registration_no": reg,
                     "registration_suffix": get_registration_suffix(reg),
-                    "chassis_no": (chassis or "")[:150],
-                    "engine_no": (_row_value(row, mapping, "engine_no") or "")[:150],
+                    # Keep missing chassis/engine as NULL, not empty strings. This is
+                    # required for the composite UNIQUE(chassis_no, engine_no) to allow
+                    # multiple valid rows where those identifiers are absent.
+                    "chassis_no": chassis[:150] if chassis else None,
+                    "engine_no": (_row_value(row, mapping, "engine_no") or None),
                     "customer_name": _row_value(row, mapping, "customer_name"),
                     "mobile": _row_value(row, mapping, "mobile"),
                     "city": _row_value(row, mapping, "city"),
@@ -326,6 +306,7 @@ def _process_import_job_streaming(
                     "bank_id": bank_id,
                     "source_file_id": af.id,
                 })
+                batch[-1]["engine_no"] = batch[-1]["engine_no"][:150] if batch[-1]["engine_no"] else None
 
                 if reg:
                     existing_regs.add(reg)
@@ -351,32 +332,23 @@ def _process_import_job_streaming(
             af.status = "IMPORTED"
             db.session.commit()
 
-            recipients_q = User.query.filter_by(active=True, is_deleted=False)
-            recipients_q = recipients_q.filter(User.agency_id == agency_id)
-            recipients = recipients_q.with_entities(User.id).all()
+            recipients = User.query.filter_by(active=True, is_deleted=False).filter(User.agency_id == agency_id).with_entities(User.id).all()
             if recipients:
                 db.session.bulk_insert_mappings(
                     Notification,
-                    [
-                        {
-                            "agency_id": agency_id,
-                            "user_id": rid,
-                            "title": "New file uploaded",
-                            "message": f"{filename} uploaded successfully with {created:,} records. Existing bank file replaced.",
-                            "type": "UPLOAD",
-                        }
-                        for (rid,) in recipients
-                    ],
+                    [{
+                        "agency_id": agency_id,
+                        "user_id": rid,
+                        "title": "New file uploaded",
+                        "message": f"{filename} uploaded successfully with {created:,} records. Existing bank file replaced.",
+                        "type": "UPLOAD",
+                    } for (rid,) in recipients],
                 )
                 db.session.commit()
 
             current_app.logger.info(
-                "File import completed: bank=%s file=%s created=%s duplicates=%s invalid=%s replaced_previous=true method=COPY atomic=true",
-                bank_id,
-                file_id,
-                created,
-                dup,
-                invalid,
+                "File import completed: agency=%s bank=%s file=%s created=%s duplicates=%s invalid=%s atomic=true",
+                agency_id, bank_id, file_id, created, dup, invalid,
             )
 
         except Exception as exc:
@@ -399,9 +371,7 @@ def _process_import_job_streaming(
 
 
 def install(app):
-    """Install the high-throughput streaming import worker."""
     from . import routes
-
     if not getattr(routes._process_import_job, "_recoveryops_streaming", False):
         _process_import_job_streaming._recoveryops_streaming = True
         routes._process_import_job = _process_import_job_streaming
