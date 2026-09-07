@@ -1,4 +1,3 @@
-import inspect
 from flask import g, jsonify, request
 from sqlalchemy import text
 
@@ -12,15 +11,13 @@ def install(app):
     if not original or getattr(original, "_recoveryops_bank_fix", False):
         return
 
-    core = inspect.unwrap(original)
-
     def fixed_import_file(*args, **kwargs):
         user = current_user()
         if not user or not user.active or getattr(user, "is_deleted", False):
             return jsonify({"error": "Authentication required"}), 401
 
         if user.role == "SUPER_ADMIN":
-            return core(user, *args, **kwargs)
+            return original(user, *args, **kwargs)
 
         if user.role not in {"ADMIN", "STAFF"}:
             return jsonify({"error": "Forbidden"}), 403
@@ -36,7 +33,8 @@ def install(app):
                 {"aid": aid},
             ).mappings().first()
             schema = str(row["schema_name"]) if row else f"recovery_agency_{aid}"
-            if schema != f"recovery_agency_{aid}":
+            expected = f"recovery_agency_{aid}"
+            if schema != expected:
                 return jsonify({"error": "Agency data store is not provisioned"}), 503
 
             raw_bank_id = request.form.get("bank_id")
@@ -46,16 +44,16 @@ def install(app):
                 requested_bank_id = None
 
             if requested_bank_id is None:
-                return core(user, *args, **kwargs)
+                return jsonify({"error": "Invalid bank_id"}), 400
 
-            # Resolve the selected bank ONLY inside the logged-in agency's tenant.
-            # The UI may submit either the bank primary key or the legacy bank code.
+            # Resolve the bank strictly inside the logged-in agency tenant.
+            # Accept both the real PK and the legacy bank code used by older clients.
             bank = db.session.execute(
                 text(
-                    f'''SELECT id, agency_id FROM "{schema}"."bank"
+                    f'''SELECT id, agency_id, name, code FROM "{schema}"."bank"
                         WHERE agency_id=:aid
                           AND (id=:bank_id OR code=:bank_code)
-                          AND COALESCE(active, true)=true
+                          AND COALESCE(active,true)=true
                         ORDER BY CASE WHEN id=:bank_id THEN 0 ELSE 1 END
                         LIMIT 1'''
                 ),
@@ -66,15 +64,36 @@ def install(app):
                 },
             ).mappings().first()
 
+            # If an older/cached browser submitted a stale bank PK, do not cross
+            # agencies. Only fall back when this agency has exactly one active bank.
+            # This preserves tenant isolation while keeping existing single-bank
+            # agency clients compatible.
+            if not bank:
+                active_banks = db.session.execute(
+                    text(
+                        f'''SELECT id, agency_id, name, code FROM "{schema}"."bank"
+                            WHERE agency_id=:aid AND COALESCE(active,true)=true
+                            ORDER BY id'''
+                    ),
+                    {"aid": aid},
+                ).mappings().all()
+                if len(active_banks) == 1:
+                    bank = active_banks[0]
+
             if not bank or int(bank["agency_id"]) != aid:
+                current_app = app.logger
+                current_app.warning(
+                    "Bank resolution failed: agency=%s requested_bank_id=%s schema=%s",
+                    aid, requested_bank_id, schema,
+                )
                 return jsonify({
                     "error": "Selected bank does not exist in your agency."
                 }), 404
 
             canonical_bank_id = int(bank["id"])
 
-            # The core importer reads request.form again. Replace only bank_id with
-            # the tenant-local canonical primary key resolved above.
+            # The original route validates Bank against the tenant search_path.
+            # Pass the canonical tenant PK so the core route and worker use the same ID.
             form = request.form.copy()
             form["bank_id"] = str(canonical_bank_id)
             request.form = form
@@ -85,7 +104,7 @@ def install(app):
                 f'SET search_path TO "{schema}", public'
             )
 
-            return core(user, *args, **kwargs)
+            return original(user, *args, **kwargs)
         except Exception:
             db.session.rollback()
             raise
