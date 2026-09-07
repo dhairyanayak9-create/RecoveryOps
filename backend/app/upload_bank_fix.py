@@ -29,14 +29,14 @@ def install(app):
             aid = int(user.agency_id)
             row = db.session.execute(
                 text(
-                    "SELECT agency_id, schema_name, legacy_agency_id "
+                    "SELECT agency_id, schema_name "
                     "FROM public.agency_tenants "
-                    "WHERE agency_id=:aid OR legacy_agency_id=:aid LIMIT 1"
+                    "WHERE agency_id=:aid LIMIT 1"
                 ),
                 {"aid": aid},
             ).mappings().first()
             schema = str(row["schema_name"]) if row else f"recovery_agency_{aid}"
-            if not schema.startswith("recovery_agency_"):
+            if schema != f"recovery_agency_{aid}":
                 return jsonify({"error": "Agency data store is not provisioned"}), 503
 
             raw_bank_id = request.form.get("bank_id")
@@ -48,13 +48,15 @@ def install(app):
             if requested_bank_id is None:
                 return core(user, *args, **kwargs)
 
-            # Bank IDs are the canonical primary key, but older UI/data could
-            # submit the bank code instead. Resolve both without crossing agencies.
+            # Resolve the selected bank ONLY inside the logged-in agency's tenant.
+            # The UI may submit either the bank primary key or the legacy bank code.
             bank = db.session.execute(
                 text(
                     f'''SELECT id, agency_id FROM "{schema}"."bank"
-                        WHERE agency_id=:aid AND (id=:bank_id OR code=:bank_code)
-                        AND COALESCE(active, true)=true
+                        WHERE agency_id=:aid
+                          AND (id=:bank_id OR code=:bank_code)
+                          AND COALESCE(active, true)=true
+                        ORDER BY CASE WHEN id=:bank_id THEN 0 ELSE 1 END
                         LIMIT 1'''
                 ),
                 {
@@ -64,30 +66,15 @@ def install(app):
                 },
             ).mappings().first()
 
-            # Compatibility fallback: public.bank mirrors the tenant bank IDs.
-            if not bank:
-                bank = db.session.execute(
-                    text(
-                        "SELECT id, agency_id FROM public.bank "
-                        "WHERE agency_id=:aid AND (id=:bank_id OR code=:bank_code) "
-                        "AND COALESCE(active, true)=true LIMIT 1"
-                    ),
-                    {
-                        "aid": aid,
-                        "bank_id": requested_bank_id,
-                        "bank_code": str(requested_bank_id),
-                    },
-                ).mappings().first()
-
-            if not bank:
+            if not bank or int(bank["agency_id"]) != aid:
                 return jsonify({
                     "error": "Selected bank does not exist in your agency."
                 }), 404
 
             canonical_bank_id = int(bank["id"])
 
-            # The core importer reads request.form again. Replace only the bank_id
-            # field with the canonical primary key resolved above.
+            # The core importer reads request.form again. Replace only bank_id with
+            # the tenant-local canonical primary key resolved above.
             form = request.form.copy()
             form["bank_id"] = str(canonical_bank_id)
             request.form = form
