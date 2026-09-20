@@ -170,7 +170,8 @@ def roles(*allowed):
     def deco(fn):
         @wraps(fn)
         def wrapper(user, *args, **kwargs):
-            if user.role != "SUPER_ADMIN" and user.role not in allowed:
+            effective_role = "STAFF" if user.role == "OFFICE_STAFF" else user.role
+            if user.role != "SUPER_ADMIN" and effective_role not in allowed:
                 return jsonify({"error": "Forbidden"}), 403
             if user.role == "SUPER_ADMIN":
                 g.agency_id = None
