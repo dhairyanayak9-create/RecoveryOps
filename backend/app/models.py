@@ -15,7 +15,7 @@ class User(db.Model):
 
 class Bank(db.Model):
     __tablename__='banks'
-    id=db.Column(db.BigInteger,primary_key=True); name=db.Column(db.Text,nullable=False,unique=True); branch=db.Column(db.Text); contact_person=db.Column(db.Text); phone=db.Column(db.Text); email=db.Column(db.Text); created_at=db.Column(db.DateTime(timezone=True),default=now)
+    id=db.Column(db.BigInteger,primary_key=True); name=db.Column(db.Text,nullable=False,unique=True); code=db.Column(db.Text); phone=db.Column(db.Text); email=db.Column(db.Text); active=db.Column(db.Boolean,default=True,nullable=False); created_at=db.Column(db.DateTime(timezone=True),default=now)
     @property
     def agency_id(self): return 1
 
