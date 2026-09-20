@@ -124,7 +124,10 @@ def current_user():
             _install_tenant_sql_routing()
             return user
 
-        resolved = _resolve_legacy_agency(user)
+        # Single-user deployment: do not remap the user through the
+        # legacy agency_members/agencies compatibility tables. The runtime
+        # User model exposes agency_id=1 and operational data lives in public.
+        resolved = user.agency_id
         if not resolved:
             return None
         token_device = data.get("device_id")
