@@ -85,7 +85,7 @@ def install(app):
         # pooled connections during nested authentication queries.
         schema = getattr(g, 'tenant_schema', None)
         if u.role != 'SUPER_ADMIN':
-            if not schema or not str(schema).startswith('recovery_agency_'):
+            if not schema or (not str(schema).startswith('recovery_agency_') and str(schema) != 'public'):
                 return jsonify({'error': 'Agency data store is not provisioned'}), 503
             rows = db.session.execute(text(f'''SELECT id, name, code, phone, email, active, created_at
                                                FROM "{schema}"."bank"
