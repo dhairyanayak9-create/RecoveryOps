@@ -92,10 +92,10 @@ def install(app):
             return jsonify([{
                 'id': x.id,
                 'name': x.name,
-                'code': None,
+                'code': x.code,
                 'phone': x.phone,
                 'email': x.email,
-                'active': True,
+                'active': bool(x.active),
                 'created_at': x.created_at.isoformat() if x.created_at else None,
             } for x in rows])
 
