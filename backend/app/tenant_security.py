@@ -121,10 +121,10 @@ def install(app):
         name = str(d.get('name') or '').strip()
         code = str(d.get('code') or '').strip() or None
         if not name: return jsonify({'error': 'Bank name required'}), 400
-        if _bank_query(u).filter(db.or_(Bank.name == name, Bank.code == code) if code else Bank.name == name).first():
+        bank_scope = Bank.query if str(getattr(g, 'tenant_schema', '')) == 'public' else _bank_query(u)
+        if bank_scope.filter(db.or_(Bank.name == name, Bank.code == code) if code else Bank.name == name).first():
             return jsonify({'error': 'Bank already exists'}), 409
-        b = Bank(agency_id=None if u.role == 'SUPER_ADMIN' else u.agency_id,
-                 name=name, code=code, phone=d.get('phone'), email=str(d.get('email') or '').strip().lower() or None, active=True)
+        b = Bank(name=name, code=code, phone=d.get('phone'), email=str(d.get('email') or '').strip().lower() or None, active=True)
         db.session.add(b); db.session.commit()
         return jsonify({'id': b.id, 'name': b.name, 'code': b.code}), 201
 
@@ -132,13 +132,14 @@ def install(app):
         u = _user()
         if not u: return _unauthorized()
         if u.role not in {'ADMIN', 'STAFF', 'SUPER_ADMIN'}: return _forbidden()
-        b = _bank_query(u).filter(Bank.id == bank_id).first()
+        bank_scope = Bank.query if str(getattr(g, 'tenant_schema', '')) == 'public' else _bank_query(u)
+        b = bank_scope.filter(Bank.id == bank_id).first()
         if not b: return jsonify({'error': 'Bank not found in your agency'}), 404
         from flask import request
         d = request.get_json(silent=True) or {}
         name = str(d.get('name') or b.name).strip()
         code = str(d.get('code') or b.code or '').strip() or None
-        clash = _bank_query(u).filter(Bank.id != b.id, db.or_(Bank.name == name, Bank.code == code) if code else Bank.name == name).first()
+        clash = bank_scope.filter(Bank.id != b.id, db.or_(Bank.name == name, Bank.code == code) if code else Bank.name == name).first()
         if clash: return jsonify({'error': 'Bank name or code already exists'}), 409
         b.name, b.code = name, code
         if 'phone' in d: b.phone = d.get('phone')
@@ -149,9 +150,10 @@ def install(app):
         u = _user()
         if not u: return _unauthorized()
         if u.role not in {'ADMIN', 'STAFF', 'SUPER_ADMIN'}: return _forbidden()
-        b = _bank_query(u).filter(Bank.id == bank_id).first()
+        bank_scope = Bank.query if str(getattr(g, 'tenant_schema', '')) == 'public' else _bank_query(u)
+        b = bank_scope.filter(Bank.id == bank_id).first()
         if not b: return jsonify({'error': 'Bank not found in your agency'}), 404
-        if Vehicle.query.filter(Vehicle.bank_id == b.id, Vehicle.agency_id == b.agency_id).first():
+        if Vehicle.query.filter(Vehicle.bank_id == b.id).first():
             return jsonify({'error': 'Bank has vehicle records. Delete or reassign those records first.'}), 409
         db.session.delete(b); db.session.commit(); return jsonify({'message': 'Bank deleted'})
 
