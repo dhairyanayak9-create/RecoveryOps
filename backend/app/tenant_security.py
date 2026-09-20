@@ -78,36 +78,39 @@ def install(app):
 
     def bank_list():
         u = _user()
-        if not u: return _unauthorized()
+        if not u:
+            return _unauthorized()
 
-        # Bank is a tenant-owned table. Resolve the schema explicitly instead of
-        # relying only on the connection search_path, which can be stale across
-        # pooled connections during nested authentication queries.
         schema = getattr(g, 'tenant_schema', None)
-        if u.role != 'SUPER_ADMIN':
-            if not schema or (not str(schema).startswith('recovery_agency_') and str(schema) != 'public'):
-                return jsonify({'error': 'Agency data store is not provisioned'}), 503
-            rows = db.session.execute(text(f'''SELECT id, name, code, phone, email, active, created_at
-                                               FROM "{schema}"."bank"
-                                               WHERE agency_id = :agency_id
-                                               ORDER BY name'''),
-                                      {'agency_id': u.agency_id}).mappings().all()
-        else:
-            if schema and str(schema).startswith('recovery_agency_'):
-                rows = db.session.execute(text(f'''SELECT id, name, code, phone, email, active, created_at
-                                                   FROM "{schema}"."bank"
-                                                   ORDER BY name''')).mappings().all()
-            else:
-                rows = db.session.execute(text('''SELECT id, name, code, phone, email, active, created_at
-                                                   FROM public."bank"
-                                                   ORDER BY name''')).mappings().all()
+        if not schema or (not str(schema).startswith('recovery_agency_') and str(schema) != 'public'):
+            return jsonify({'error': 'Agency data store is not provisioned'}), 503
+
+        # Single-user deployment stores banks in public.banks. Never query
+        # the legacy recovery_agency_*.bank table when routed to public.
+        if str(schema) == 'public':
+            rows = Bank.query.order_by(Bank.name.asc()).all()
+            return jsonify([{
+                'id': x.id,
+                'name': x.name,
+                'code': None,
+                'phone': x.phone,
+                'email': x.email,
+                'active': True,
+                'created_at': x.created_at.isoformat() if x.created_at else None,
+            } for x in rows])
+
+        rows = db.session.execute(text(f'''SELECT id, name, code, phone, email, active, created_at
+                                           FROM "{schema}"."bank"
+                                           WHERE agency_id = :agency_id
+                                           ORDER BY name'''),
+                                  {'agency_id': u.agency_id}).mappings().all()
 
         return jsonify([{
-            'id': b['id'], 'name': b['name'], 'code': b['code'],
-            'phone': b['phone'], 'email': b['email'],
-            'active': bool(b['active']),
-            'created_at': b['created_at'].isoformat() if b['created_at'] else None,
-        } for b in rows])
+            'id': x['id'], 'name': x['name'], 'code': x['code'],
+            'phone': x['phone'], 'email': x['email'],
+            'active': bool(x['active']),
+            'created_at': x['created_at'].isoformat() if x['created_at'] else None,
+        } for x in rows])
 
     def bank_create():
         u = _user()
