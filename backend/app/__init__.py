@@ -15,19 +15,16 @@ def _agency_id():
 
 def _install_tenant_guards():
     from .models import TENANT_MODELS
-
     @event.listens_for(Session,'after_begin')
     def _set_tenant_search_path(session, transaction, connection):
         aid = _agency_id()
-        if not aid:
-            return
+        if not aid:return
         try:
-            schema = f'recovery_agency_{int(aid)}'
-            if re.fullmatch(r"recovery_agency_[0-9]+", schema):
-                g.tenant_schema = schema
+            schema=f'recovery_agency_{int(aid)}'
+            if re.fullmatch(r"recovery_agency_[0-9]+",schema):
+                g.tenant_schema=schema
                 connection.exec_driver_sql(f'SET search_path TO "{schema}", public')
-        except Exception:
-            pass
+        except Exception:pass
     @event.listens_for(db.session,'do_orm_execute')
     def _scope(execute_state):
         aid=_agency_id()
@@ -67,8 +64,8 @@ def create_app():
     app.register_blueprint(api,url_prefix='/api');app.register_blueprint(web)
     from .super_admin import super_admin
     app.register_blueprint(super_admin)
-    app.view_functions['super_admin.super_admin_page'] = lambda: render_template('super_admin_login.html')
-    app.add_url_rule('/super-admin/control','super_admin_control_page',lambda: render_template('super_admin.html'))
+    app.view_functions['super_admin.super_admin_page']=lambda:render_template('super_admin_login.html')
+    app.add_url_rule('/super-admin/control','super_admin_control_page',lambda:render_template('super_admin.html'))
     from .tenant_security import install as install_tenant_security
     install_tenant_security(app)
     from .import_fix import install as install_import_fix
@@ -79,6 +76,10 @@ def create_app():
     install_upload_bank_fix(app)
     from .repo_agent_access_fix import install as install_repo_agent_access_fix
     install_repo_agent_access_fix()
+    # Single-user compatibility must be installed last so its login wrapper
+    # remains the outermost handler after all legacy compatibility patches.
+    from .single_user_compat import install as install_single_user_compat
+    install_single_user_compat(app)
     with app.app_context():
         if database_url.startswith('sqlite'):db.create_all()
         ensure_schema()
@@ -92,33 +93,20 @@ def ensure_schema():
             c=db.session.execute(text('SELECT id FROM public.agency_company WHERE name=:n OR code=:s LIMIT 1'),{'n':a['name'],'s':a['slug']}).scalar()
             if not c:
                 db.session.execute(text('INSERT INTO public.agency_company(name,code,phone,email,active,supabase_agency_id,created_at) VALUES(:n,:s,:p,:e,:x,:sid,now())'),{'n':a['name'],'s':a['slug'],'p':a['phone'],'e':a['email'],'x':bool(a['is_active']),'sid':str(a['id'])})
-            else:
-                db.session.execute(text('UPDATE public.agency_company SET phone=:p,email=:e,active=:x WHERE id=:id'),{'id':c,'p':a['phone'],'e':a['email'],'x':bool(a['is_active'])})
-        # Canonical runtime identity is the agency_company ID. Keep existing
-        # user memberships on that same ID and never derive a different tenant ID.
-        db.session.execute(text('''UPDATE public."user" u SET agency_id=amap.agency_id FROM (
-            SELECT am.user_id, c.id AS agency_id
-            FROM public.agency_members am
-            JOIN public.agencies a ON a.id=am.agency_id
-            JOIN public.agency_company c ON c.name=a.name OR c.code=a.slug
-            WHERE am.is_active=true
-        ) amap WHERE u.id=amap.user_id AND u.agency_id IS DISTINCT FROM amap.agency_id'''))
-        # Provision missing canonical schemas from agency_company IDs.
+            else:db.session.execute(text('UPDATE public.agency_company SET phone=:p,email=:e,active=:x WHERE id=:id'),{'id':c,'p':a['phone'],'e':a['email'],'x':bool(a['is_active'])})
+        db.session.execute(text('''UPDATE public."user" u SET agency_id=amap.agency_id FROM (SELECT am.user_id,c.id AS agency_id FROM public.agency_members am JOIN public.agencies a ON a.id=am.agency_id JOIN public.agency_company c ON c.name=a.name OR c.code=a.slug WHERE am.is_active=true) amap WHERE u.id=amap.user_id AND u.agency_id IS DISTINCT FROM amap.agency_id'''))
         rows=db.session.execute(text('SELECT id FROM public.agency_company WHERE active=true')).scalars().all()
         for aid in rows:
             schema=f'recovery_agency_{int(aid)}'
             db.session.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
-            db.session.execute(text('''INSERT INTO public.agency_tenants(agency_id,legacy_agency_id,schema_name,provisioned_at,schema_version)
-                VALUES(:aid,:aid,:schema,now(),1)
-                ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''),{'aid':int(aid),'schema':schema})
+            db.session.execute(text('''INSERT INTO public.agency_tenants(agency_id,legacy_agency_id,schema_name,provisioned_at,schema_version) VALUES(:aid,:aid,:schema,now(),1) ON CONFLICT (agency_id) DO UPDATE SET legacy_agency_id=EXCLUDED.legacy_agency_id,schema_name=EXCLUDED.schema_name,schema_version=1'''),{'aid':int(aid),'schema':schema})
         db.session.commit()
     except Exception:db.session.rollback()
 
-def _provision_tenant_schema(modern_agency_id, legacy_agency_id, conn=None):
+def _provision_tenant_schema(modern_agency_id,legacy_agency_id,conn=None):
     if conn is None:conn=db.session.connection()
     if conn.dialect.name!='postgresql':return None
-    agency_id=int(modern_agency_id)
-    schema=f'recovery_agency_{agency_id}'
+    agency_id=int(modern_agency_id);schema=f'recovery_agency_{agency_id}'
     tables=('bank','client','vehicle','recovery_case','app_file','data_assignment','status_history_legacy','notification','sync_mutation','challan','chat_conversation','chat_message','report')
     conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema}"'))
     for table in tables:
