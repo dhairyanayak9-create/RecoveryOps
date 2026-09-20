@@ -48,6 +48,9 @@ def _tenant_schema_for(agency_id):
         aid = int(agency_id)
         if aid <= 0:
             return None
+        # Single-user deployment keeps operational tables in public.
+        if aid == 1:
+            return "public"
         # Tenant identity is deliberately the same as the application's agency ID.
         # Keep agency_tenants as a compatibility registry, but never use a separate
         # modern/legacy ID to choose the tenant schema.
