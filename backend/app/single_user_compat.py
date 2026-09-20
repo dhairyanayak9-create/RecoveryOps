@@ -5,19 +5,21 @@ from sqlalchemy import func
 
 def install(app):
     from .models import User
+    from . import db
 
-    # Current single-user deployment keeps legacy model compatibility.
-    # These properties prevent old agency/device fields from breaking auth.
-    if not hasattr(User, "role"):
-        User.role = property(
-            lambda self: getattr(self, "_runtime_role", "ADMIN"),
-            lambda self, value: setattr(self, "_runtime_role", value),
-        )
-    if not hasattr(User, "device_id"):
-        User.device_id = property(
-            lambda self: getattr(self, "_runtime_device_id", None),
-            lambda self, value: setattr(self, "_runtime_device_id", value),
-        )
+    # Runtime compatibility for the single-user schema.
+    User.role = property(
+        lambda self: getattr(self, "_runtime_role", "ADMIN"),
+        lambda self, value: setattr(self, "_runtime_role", value),
+    )
+    User.device_id = property(
+        lambda self: getattr(self, "_runtime_device_id", None),
+        lambda self, value: setattr(self, "_runtime_device_id", value),
+    )
+    User.agency_id = property(
+        lambda self: getattr(self, "_runtime_agency_id", 1),
+        lambda self, value: setattr(self, "_runtime_agency_id", value),
+    )
 
     original = app.view_functions.get("api.login")
     if not original or getattr(original, "_single_user_bootstrap", False):
@@ -25,9 +27,8 @@ def install(app):
 
     @wraps(original)
     def login_with_bootstrap(*args, **kwargs):
-        # Bootstrap is available only while the users table is empty.
-        # The submitted password is hashed inside the application and is
-        # never stored in source code or logs.
+        # Only runs when the users table is completely empty.
+        # The submitted password is hashed in-process and never logged.
         try:
             if User.query.with_entities(func.count(User.id)).scalar() == 0:
                 data = request.get_json(silent=True) or {}
@@ -37,33 +38,25 @@ def install(app):
                     or data.get("email")
                     or ""
                 ).strip().lower()
-                email = (str(data.get("email") or "").strip().lower()
-                         or "dhairyanayak9@gmail.com")
-                allowed_username = "dhairya"
-                allowed_email = "dhairyanayak9@gmail.com"
 
-                if identifier in {allowed_username, allowed_email}:
+                if identifier in {"dhairya", "dhairyanayak9@gmail.com"}:
                     password = str(data.get("password") or "")
                     if password:
                         user = User(
                             username="Dhairya",
                             password_hash=generate_password_hash(password),
                             full_name="Dhairya",
-                            email=email,
+                            email="dhairyanayak9@gmail.com",
                             active=True,
                         )
-                        db = User.query.session if hasattr(User.query, "session") else None
-                        if db is None:
-                            from . import db
-                            db = db.session
-                        db.add(user)
-                        db.flush()
                         user.role = "ADMIN"
-                        db.commit()
+                        user.agency_id = 1
+                        db.session.add(user)
+                        db.session.commit()
         except Exception:
-            from . import db
             db.session.rollback()
             app.logger.exception("Single-user bootstrap failed")
+
         return original(*args, **kwargs)
 
     login_with_bootstrap._single_user_bootstrap = True
