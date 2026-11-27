@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
 
@@ -6,7 +6,7 @@ export default function Home() {
   const [api, setApi] = useState("");
   async function check() {
     try {
-      const r = await fetch("http://localhost:8000/health");
+      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/health`);
       const j = await r.json();
       setApi(j.status);
     } catch {
