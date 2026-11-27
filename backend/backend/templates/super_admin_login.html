@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RecoveryOps — Super Admin Login</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f7fb;font-family:Arial,sans-serif;color:#17233b}
+.card{width:min(420px,calc(100% - 32px));background:#fff;border:1px solid #dfe6ef;border-radius:16px;padding:28px;box-shadow:0 10px 35px rgba(23,35,59,.08);box-sizing:border-box}
+h1{margin:0 0 8px;font-size:26px}.muted{color:#667085;font-size:14px;margin-bottom:22px}
+label{display:block;font-weight:700;font-size:14px;margin:14px 0}input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #cbd5e1;border-radius:9px;margin-top:6px;font-size:15px}
+button{width:100%;border:0;border-radius:9px;padding:12px;background:#17233b;color:#fff;font-weight:700;cursor:pointer;font-size:15px;margin-top:10px}.msg{margin-top:12px;min-height:20px;font-weight:700;color:#b42318}.back{display:block;text-align:center;margin-top:16px;color:#475467;text-decoration:none;font-size:13px}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>RecoveryOps Super Admin</h1>
+<div class="muted">Standalone control-center login</div>
+<form id="loginForm">
+<label>Username / Email<input id="username" autocomplete="username" required></label>
+<label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+<button id="btn" type="submit">Sign in as Super Admin</button>
+<div id="msg" class="msg"></div>
+</form>
+<a class="back" href="/">Back to RecoveryOps</a>
+</div>
+<script>
+const form=document.getElementById('loginForm');
+form.addEventListener('submit',async e=>{
+ e.preventDefault();
+ const btn=document.getElementById('btn'),msg=document.getElementById('msg');
+ btn.disabled=true;btn.textContent='Signing in...';msg.textContent='';
+ try{
+  const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value.trim(),password:document.getElementById('password').value})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok)throw Error(d.error||'Login failed');
+  if(!d.user||d.user.role!=='SUPER_ADMIN')throw Error('Super Admin access required');
+  localStorage.setItem('recovery_token',d.token);localStorage.setItem('recovery_user',JSON.stringify(d.user));
+  location.href='/super-admin/control';
+ }catch(err){msg.textContent=err.message||'Login failed';btn.disabled=false;btn.textContent='Sign in as Super Admin'}
+});
+</script>
+</body>
+</html>
