@@ -5,8 +5,20 @@ import redis
 import pandas as pd
 import psycopg
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://recoveryops-ivory.vercel.app",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -14,6 +26,7 @@ r = redis.from_url(REDIS_URL, decode_responses=True)
 
 
 @app.get("/")
+@app.get("/health")
 def health_check():
     return {"status": "online", "service": "RecoveryOps"}
 
