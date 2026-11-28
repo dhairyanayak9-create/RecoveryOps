@@ -78,36 +78,39 @@ def install(app):
 
     def bank_list():
         u = _user()
-        if not u: return _unauthorized()
+        if not u:
+            return _unauthorized()
 
-        # Bank is a tenant-owned table. Resolve the schema explicitly instead of
-        # relying only on the connection search_path, which can be stale across
-        # pooled connections during nested authentication queries.
         schema = getattr(g, 'tenant_schema', None)
-        if u.role != 'SUPER_ADMIN':
-            if not schema or not str(schema).startswith('recovery_agency_'):
-                return jsonify({'error': 'Agency data store is not provisioned'}), 503
-            rows = db.session.execute(text(f'''SELECT id, name, code, phone, email, active, created_at
-                                               FROM "{schema}"."bank"
-                                               WHERE agency_id = :agency_id
-                                               ORDER BY name'''),
-                                      {'agency_id': u.agency_id}).mappings().all()
-        else:
-            if schema and str(schema).startswith('recovery_agency_'):
-                rows = db.session.execute(text(f'''SELECT id, name, code, phone, email, active, created_at
-                                                   FROM "{schema}"."bank"
-                                                   ORDER BY name''')).mappings().all()
-            else:
-                rows = db.session.execute(text('''SELECT id, name, code, phone, email, active, created_at
-                                                   FROM public."bank"
-                                                   ORDER BY name''')).mappings().all()
+        if not schema or (not str(schema).startswith('recovery_agency_') and str(schema) != 'public'):
+            return jsonify({'error': 'Agency data store is not provisioned'}), 503
+
+        # Single-user deployment stores banks in public.banks. Never query
+        # the legacy recovery_agency_*.bank table when routed to public.
+        if str(schema) == 'public':
+            rows = Bank.query.order_by(Bank.name.asc()).all()
+            return jsonify([{
+                'id': x.id,
+                'name': x.name,
+                'code': x.code,
+                'phone': x.phone,
+                'email': x.email,
+                'active': bool(x.active),
+                'created_at': x.created_at.isoformat() if x.created_at else None,
+            } for x in rows])
+
+        rows = db.session.execute(text(f'''SELECT id, name, code, phone, email, active, created_at
+                                           FROM "{schema}"."bank"
+                                           WHERE agency_id = :agency_id
+                                           ORDER BY name'''),
+                                  {'agency_id': u.agency_id}).mappings().all()
 
         return jsonify([{
-            'id': b['id'], 'name': b['name'], 'code': b['code'],
-            'phone': b['phone'], 'email': b['email'],
-            'active': bool(b['active']),
-            'created_at': b['created_at'].isoformat() if b['created_at'] else None,
-        } for b in rows])
+            'id': x['id'], 'name': x['name'], 'code': x['code'],
+            'phone': x['phone'], 'email': x['email'],
+            'active': bool(x['active']),
+            'created_at': x['created_at'].isoformat() if x['created_at'] else None,
+        } for x in rows])
 
     def bank_create():
         u = _user()
@@ -118,10 +121,10 @@ def install(app):
         name = str(d.get('name') or '').strip()
         code = str(d.get('code') or '').strip() or None
         if not name: return jsonify({'error': 'Bank name required'}), 400
-        if _bank_query(u).filter(db.or_(Bank.name == name, Bank.code == code) if code else Bank.name == name).first():
+        bank_scope = Bank.query if str(getattr(g, 'tenant_schema', '')) == 'public' else _bank_query(u)
+        if bank_scope.filter(db.or_(Bank.name == name, Bank.code == code) if code else Bank.name == name).first():
             return jsonify({'error': 'Bank already exists'}), 409
-        b = Bank(agency_id=None if u.role == 'SUPER_ADMIN' else u.agency_id,
-                 name=name, code=code, phone=d.get('phone'), email=str(d.get('email') or '').strip().lower() or None, active=True)
+        b = Bank(name=name, code=code, phone=d.get('phone'), email=str(d.get('email') or '').strip().lower() or None, active=True)
         db.session.add(b); db.session.commit()
         return jsonify({'id': b.id, 'name': b.name, 'code': b.code}), 201
 
@@ -129,13 +132,14 @@ def install(app):
         u = _user()
         if not u: return _unauthorized()
         if u.role not in {'ADMIN', 'STAFF', 'SUPER_ADMIN'}: return _forbidden()
-        b = _bank_query(u).filter(Bank.id == bank_id).first()
+        bank_scope = Bank.query if str(getattr(g, 'tenant_schema', '')) == 'public' else _bank_query(u)
+        b = bank_scope.filter(Bank.id == bank_id).first()
         if not b: return jsonify({'error': 'Bank not found in your agency'}), 404
         from flask import request
         d = request.get_json(silent=True) or {}
         name = str(d.get('name') or b.name).strip()
         code = str(d.get('code') or b.code or '').strip() or None
-        clash = _bank_query(u).filter(Bank.id != b.id, db.or_(Bank.name == name, Bank.code == code) if code else Bank.name == name).first()
+        clash = bank_scope.filter(Bank.id != b.id, db.or_(Bank.name == name, Bank.code == code) if code else Bank.name == name).first()
         if clash: return jsonify({'error': 'Bank name or code already exists'}), 409
         b.name, b.code = name, code
         if 'phone' in d: b.phone = d.get('phone')
@@ -146,9 +150,10 @@ def install(app):
         u = _user()
         if not u: return _unauthorized()
         if u.role not in {'ADMIN', 'STAFF', 'SUPER_ADMIN'}: return _forbidden()
-        b = _bank_query(u).filter(Bank.id == bank_id).first()
+        bank_scope = Bank.query if str(getattr(g, 'tenant_schema', '')) == 'public' else _bank_query(u)
+        b = bank_scope.filter(Bank.id == bank_id).first()
         if not b: return jsonify({'error': 'Bank not found in your agency'}), 404
-        if Vehicle.query.filter(Vehicle.bank_id == b.id, Vehicle.agency_id == b.agency_id).first():
+        if Vehicle.query.filter(Vehicle.bank_id == b.id).first():
             return jsonify({'error': 'Bank has vehicle records. Delete or reassign those records first.'}), 409
         db.session.delete(b); db.session.commit(); return jsonify({'message': 'Bank deleted'})
 

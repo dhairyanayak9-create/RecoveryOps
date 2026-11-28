@@ -48,6 +48,9 @@ def _tenant_schema_for(agency_id):
         aid = int(agency_id)
         if aid <= 0:
             return None
+        # Single-user deployment keeps operational tables in public.
+        if aid == 1:
+            return "public"
         # Tenant identity is deliberately the same as the application's agency ID.
         # Keep agency_tenants as a compatibility registry, but never use a separate
         # modern/legacy ID to choose the tenant schema.
@@ -121,7 +124,10 @@ def current_user():
             _install_tenant_sql_routing()
             return user
 
-        resolved = _resolve_legacy_agency(user)
+        # Single-user deployment: do not remap the user through the
+        # legacy agency_members/agencies compatibility tables. The runtime
+        # User model exposes agency_id=1 and operational data lives in public.
+        resolved = user.agency_id
         if not resolved:
             return None
         token_device = data.get("device_id")
@@ -167,7 +173,8 @@ def roles(*allowed):
     def deco(fn):
         @wraps(fn)
         def wrapper(user, *args, **kwargs):
-            if user.role != "SUPER_ADMIN" and user.role not in allowed:
+            effective_role = "STAFF" if user.role == "OFFICE_STAFF" else user.role
+            if user.role != "SUPER_ADMIN" and effective_role not in allowed:
                 return jsonify({"error": "Forbidden"}), 403
             if user.role == "SUPER_ADMIN":
                 g.agency_id = None
